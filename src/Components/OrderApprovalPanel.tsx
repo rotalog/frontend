@@ -11,11 +11,13 @@ interface OrderApprovalPanelProps {
   onConfirmPayment: () => void;
   onStartPreparation: () => void;
   onDispatch: () => void;
+  onCancel: () => void;
   onMarkDelivered: () => void;
   rejectionReason?: string;
   timeline: OrderTimelineEvent[];
   stock: StockItem[];
   actionFeedback?: string;
+  isSyncing?: boolean;
 }
 
 function formatCurrency(value: number) {
@@ -45,11 +47,13 @@ export function OrderApprovalPanel({
   onConfirmPayment,
   onStartPreparation,
   onDispatch,
+  onCancel,
   onMarkDelivered,
   rejectionReason,
   timeline,
   stock,
   actionFeedback,
+  isSyncing = false,
 }: OrderApprovalPanelProps) {
   const [rejectionInput, setRejectionInput] = useState('');
   const [showRejectError, setShowRejectError] = useState(false);
@@ -154,6 +158,7 @@ export function OrderApprovalPanel({
               <button
                 type="button"
                 onClick={onAccept}
+                disabled={isSyncing}
                 className="rounded-lg px-3 py-2 text-sm font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 hover:bg-emerald-500/30 light:bg-emerald-100 light:text-emerald-700 light:border-emerald-300 transition-colors"
               >
                 Aceitar (reservar estoque)
@@ -161,6 +166,7 @@ export function OrderApprovalPanel({
               <button
                 type="button"
                 onClick={handleReject}
+                disabled={isSyncing}
                 className="rounded-lg px-3 py-2 text-sm font-semibold bg-red-500/20 text-red-400 border border-red-500/40 hover:bg-red-500/30 light:bg-red-100 light:text-red-700 light:border-red-300 transition-colors"
               >
                 Recusar pedido
@@ -173,6 +179,7 @@ export function OrderApprovalPanel({
           <button
             type="button"
             onClick={onConfirmPayment}
+            disabled={isSyncing}
             className="w-full rounded-lg px-3 py-2 text-sm font-semibold bg-sky-500/20 text-sky-400 border border-sky-500/40 hover:bg-sky-500/30 light:bg-sky-100 light:text-sky-700 light:border-sky-300 transition-colors"
           >
             Confirmar pagamento
@@ -183,6 +190,7 @@ export function OrderApprovalPanel({
           <button
             type="button"
             onClick={onStartPreparation}
+            disabled={isSyncing}
             className="w-full rounded-lg px-3 py-2 text-sm font-semibold bg-amber-500/20 text-amber-400 border border-amber-500/40 hover:bg-amber-500/30 light:bg-amber-100 light:text-amber-700 light:border-amber-300 transition-colors"
           >
             Marcar como Em Separacao
@@ -193,9 +201,21 @@ export function OrderApprovalPanel({
           <button
             type="button"
             onClick={onDispatch}
+            disabled={isSyncing}
             className="w-full rounded-lg px-3 py-2 text-sm font-semibold bg-violet-500/20 text-violet-400 border border-violet-500/40 hover:bg-violet-500/30 light:bg-violet-100 light:text-violet-700 light:border-violet-300 transition-colors"
           >
             Despachar para entrega (baixar estoque)
+          </button>
+        )}
+
+        {(order.status === 'SOLICITADO' || order.status === 'ACEITO' || order.status === 'PAGAMENTO_CONFIRMADO' || order.status === 'EM_SEPARACAO') && (
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={isSyncing}
+            className="mt-2 w-full rounded-lg px-3 py-2 text-sm font-semibold bg-rose-500/20 text-rose-400 border border-rose-500/40 hover:bg-rose-500/30 light:bg-rose-100 light:text-rose-700 light:border-rose-300 transition-colors"
+          >
+            Cancelar pedido
           </button>
         )}
 
@@ -203,6 +223,7 @@ export function OrderApprovalPanel({
           <button
             type="button"
             onClick={onMarkDelivered}
+            disabled={isSyncing}
             className="w-full rounded-lg px-3 py-2 text-sm font-semibold bg-teal-500/20 text-teal-400 border border-teal-500/40 hover:bg-teal-500/30 light:bg-teal-100 light:text-teal-700 light:border-teal-300 transition-colors"
           >
             Marcar como Entregue

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import type React from 'react';
+import { getInventoryMovements, importInventoryCsv, updateInventory } from '../services/inventory';
+import { createProduct, deleteProduct, updateProduct } from '../services/products';
 import type { StockItem, StockMovement, StockMovementType } from '../types/orders';
 
 interface StockManagementSectionProps {
@@ -18,6 +20,11 @@ type ProductEditState = {
   total: string;
   reservado: string;
   fotoUrl: string;
+};
+
+type StockIdentity = StockItem & {
+  productId?: string;
+  id?: string;
 };
 
 const movementTypeLabels: Record<StockMovementType, string> = {
@@ -49,6 +56,14 @@ function toInputDate(isoDate: string) {
   return `${year}-${month}-${day}`;
 }
 
+function normalizeMovementType(value: unknown): StockMovementType {
+  if (value === 'ENTRY' || value === 'RESERVATION' || value === 'RELEASE' || value === 'EXIT') {
+    return value;
+  }
+
+  return 'ENTRY';
+}
+
 async function fileToDataUrl(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -62,6 +77,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
   const [editableRows, setEditableRows] = useState<EditableRowState>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [importFeedback, setImportFeedback] = useState('');
+  const [importError, setImportError] = useState('');
   const [movementTypeFilter, setMovementTypeFilter] = useState<'ALL' | StockMovementType>('ALL');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -72,6 +88,67 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
   const [newProduct, setNewProduct] = useState({ codigo: '', produto: '', total: '0', reservado: '0', fotoUrl: '' });
   const [editingProduct, setEditingProduct] = useState<ProductEditState | null>(null);
   const [editModalError, setEditModalError] = useState('');
+  const [isSyncingStock, setIsSyncingStock] = useState('');
+  const [stockActionError, setStockActionError] = useState('');
+  const [usingLocalStockFallback, setUsingLocalStockFallback] = useState(false);
+  const [apiMovements, setApiMovements] = useState<StockMovement[] | null>(null);
+
+  const getStockProductId = (item: StockItem) => {
+    const stockIdentity = item as StockIdentity;
+    return stockIdentity.productId ?? stockIdentity.id ?? item.produto;
+  };
+
+  const buildInventoryUpdatePayload = (
+    item: StockItem,
+    changes?: Partial<{ total: number; reservado: number }>,
+  ) => {
+    const total = changes?.total ?? item.total;
+    const reservado = changes?.reservado ?? item.reservado;
+
+    return {
+      quantity: total,
+      reservedQuantity: reservado,
+      reason: 'Ajuste manual no painel web',
+    };
+  };
+
+  const updateStockItemLocally = (
+    productId: string,
+    changes: Partial<Pick<StockItem, 'codigo' | 'produto' | 'total' | 'reservado' | 'fotoUrl'>>,
+  ) => {
+    setStock(currentStock =>
+      currentStock.map(item =>
+        getStockProductId(item) === productId
+          ? { ...item, ...changes }
+          : item,
+      ),
+    );
+  };
+
+  const getApiErrorMessage = (error: unknown) => {
+    if (error instanceof Error && error.message.trim()) {
+      return error.message;
+    }
+
+    return 'Falha na comunicacao com a API.';
+  };
+
+  const runWithFallback = async (syncKey: string, onApiAction: () => Promise<void>, onLocalFallback: () => void) => {
+    setIsSyncingStock(syncKey);
+    setStockActionError('');
+    setImportError('');
+
+    try {
+      await onApiAction();
+      setUsingLocalStockFallback(false);
+    } catch {
+      onLocalFallback();
+      setUsingLocalStockFallback(true);
+      setStockActionError('API indisponivel. A alteracao foi simulada localmente.');
+    } finally {
+      setIsSyncingStock('');
+    }
+  };
 
   useEffect(() => {
     const nextEditableRows = stock.reduce<EditableRowState>((acc, item) => {
@@ -85,32 +162,53 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     setEditableRows(nextEditableRows);
   }, [stock]);
 
-  const handleSaveRow = (productName: string) => {
-    const stockItem = stock.find(item => item.produto === productName);
-    const editable = editableRows[productName];
+  useEffect(() => {
+    let active = true;
 
-    if (!stockItem || !editable) {
-      return;
-    }
+    const loadMovements = async () => {
+      try {
+        const response = await getInventoryMovements();
+        if (!active) {
+          return;
+        }
 
-    const newTotal = Number(editable.total);
-    const newReserved = Number(editable.reserved);
+        const mapped = response.map((movement, index) => ({
+          id: typeof movement.id === 'string' ? movement.id : `${Date.now()}-${index}`,
+          product: movement.productName ?? movement.productId ?? 'Produto',
+          type: normalizeMovementType(movement.type),
+          quantity: typeof movement.quantity === 'number' ? movement.quantity : 0,
+          source: movement.source ?? 'Movimentacao API',
+          createdAt: movement.createdAt ?? new Date().toISOString(),
+        }));
 
-    if (!Number.isFinite(newTotal) || !Number.isFinite(newReserved) || newTotal < 0 || newReserved < 0) {
-      setRowErrors(current => ({ ...current, [productName]: 'Valores invalidos. Use numeros positivos.' }));
-      return;
-    }
+        setApiMovements(mapped);
+      } catch {
+        if (!active) {
+          return;
+        }
 
-    if (newReserved > newTotal) {
-      setRowErrors(current => ({ ...current, [productName]: 'Reservado nao pode ser maior que total.' }));
-      return;
-    }
+        setApiMovements(null);
+      }
+    };
 
-    setRowErrors(current => ({ ...current, [productName]: '' }));
+    void loadMovements();
 
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const applyStockUpdateLocally = (
+    productId: string,
+    productName: string,
+    oldTotal: number,
+    oldReserved: number,
+    newTotal: number,
+    newReserved: number,
+  ) => {
     const movementsToRegister: Array<Omit<StockMovement, 'id' | 'createdAt'>> = [];
-    const totalDiff = newTotal - stockItem.total;
-    const reservedDiff = newReserved - stockItem.reservado;
+    const totalDiff = newTotal - oldTotal;
+    const reservedDiff = newReserved - oldReserved;
 
     if (totalDiff > 0) {
       movementsToRegister.push({
@@ -144,65 +242,79 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       });
     }
 
-    setStock(currentStock =>
-      currentStock.map(item =>
-        item.produto === productName
-          ? { ...item, total: newTotal, reservado: newReserved }
-          : item,
-      ),
-    );
+    updateStockItemLocally(productId, {
+      total: newTotal,
+      reservado: newReserved,
+    });
 
     if (movementsToRegister.length > 0) {
       onRegisterMovements(movementsToRegister);
     }
   };
 
-  const handleImportCsv = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) {
+  const handleSaveRow = async (productName: string) => {
+    const stockItem = stock.find(item => item.produto === productName);
+    const editable = editableRows[productName];
+
+    if (!stockItem || !editable) {
       return;
     }
 
-    const text = await file.text();
-    const lines = text
-      .split(/\r?\n/)
-      .map(line => line.trim())
-      .filter(Boolean);
+    const newTotal = Number(editable.total);
+    const newReserved = Number(editable.reserved);
 
-    if (lines.length < 2) {
-      setImportFeedback('CSV vazio ou sem linhas de dados.');
+    if (!Number.isFinite(newTotal) || !Number.isFinite(newReserved) || newTotal < 0 || newReserved < 0) {
+      setRowErrors(current => ({ ...current, [productName]: 'Valores invalidos. Use numeros positivos.' }));
       return;
     }
 
-    const headers = lines[0].split(',').map(header => header.trim().toLowerCase());
-    const productIndex = headers.findIndex(h => h === 'produto' || h === 'product');
-    const totalIndex = headers.findIndex(h => h === 'total_quantity' || h === 'total');
-    const reservedIndex = headers.findIndex(h => h === 'reserved_quantity' || h === 'reserved' || h === 'reservado');
-    const codeIndex = headers.findIndex(h => h === 'codigo' || h === 'code' || h === 'sku');
-
-    if (productIndex === -1 || totalIndex === -1 || reservedIndex === -1) {
-      setImportFeedback('Cabecalho invalido. Use: produto,total_quantity,reserved_quantity');
+    if (newReserved > newTotal) {
+      setRowErrors(current => ({ ...current, [productName]: 'Reservado nao pode ser maior que total.' }));
       return;
     }
 
-    const parsedRows = lines.slice(1).map(line => {
-      const cols = line.split(',').map(col => col.trim());
-      const fallbackCode = `CSV-${cols[productIndex]?.replace(/\s+/g, '-').toUpperCase()}`;
-      return {
-        codigo: codeIndex >= 0 ? cols[codeIndex] : fallbackCode,
-        produto: cols[productIndex],
-        total: Number(cols[totalIndex]),
-        reservado: Number(cols[reservedIndex]),
-      };
-    }).filter(row => row.produto);
+    setRowErrors(current => ({ ...current, [productName]: '' }));
 
+    const productId = String(getStockProductId(stockItem));
+
+    await runWithFallback(
+      `save-row:${productId}`,
+      async () => {
+        await updateInventory(productId, buildInventoryUpdatePayload(stockItem, {
+          total: newTotal,
+          reservado: newReserved,
+        }));
+
+        applyStockUpdateLocally(
+          productId,
+          stockItem.produto,
+          stockItem.total,
+          stockItem.reservado,
+          newTotal,
+          newReserved,
+        );
+      },
+      () => {
+        applyStockUpdateLocally(
+          productId,
+          stockItem.produto,
+          stockItem.total,
+          stockItem.reservado,
+          newTotal,
+          newReserved,
+        );
+      },
+    );
+  };
+
+  const applyImportedRowsLocally = (rows: Array<{ codigo: string; produto: string; total: number; reservado: number }>) => {
     let updatedCount = 0;
     const importMovements: Array<Omit<StockMovement, 'id' | 'createdAt'>> = [];
 
     setStock(currentStock => {
       const byProduct = new Map(currentStock.map(item => [item.produto, item]));
 
-      parsedRows.forEach(row => {
+      rows.forEach(row => {
         if (!Number.isFinite(row.total) || !Number.isFinite(row.reservado) || row.total < 0 || row.reservado < 0 || row.reservado > row.total) {
           return;
         }
@@ -234,6 +346,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
               source: 'Importacao CSV',
             });
           }
+
           return;
         }
 
@@ -284,11 +397,96 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     }
 
     setImportFeedback(`${updatedCount} produto(s) processado(s) via CSV.`);
-    event.target.value = '';
   };
 
+  const parseCsvRows = (text: string) => {
+    const lines = text
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    if (lines.length < 2) {
+      throw new Error('CSV vazio ou sem linhas de dados.');
+    }
+
+    const headers = lines[0].split(',').map(header => header.trim().toLowerCase());
+    const productIndex = headers.findIndex(h => h === 'produto' || h === 'product');
+    const totalIndex = headers.findIndex(h => h === 'total_quantity' || h === 'total');
+    const reservedIndex = headers.findIndex(h => h === 'reserved_quantity' || h === 'reserved' || h === 'reservado');
+    const codeIndex = headers.findIndex(h => h === 'codigo' || h === 'code' || h === 'sku');
+
+    if (productIndex === -1 || totalIndex === -1 || reservedIndex === -1) {
+      throw new Error('Cabecalho invalido. Use: produto,total_quantity,reserved_quantity');
+    }
+
+    return lines.slice(1)
+      .map(line => {
+        const cols = line.split(',').map(col => col.trim());
+        const fallbackCode = `CSV-${cols[productIndex]?.replace(/\s+/g, '-').toUpperCase()}`;
+        return {
+          codigo: codeIndex >= 0 ? cols[codeIndex] : fallbackCode,
+          produto: cols[productIndex],
+          total: Number(cols[totalIndex]),
+          reservado: Number(cols[reservedIndex]),
+        };
+      })
+      .filter(row => row.produto);
+  };
+
+  const handleImportCsv = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    setImportFeedback('');
+    setImportError('');
+
+    try {
+      setIsSyncingStock('import-csv');
+      await importInventoryCsv(file);
+
+      try {
+        const latestMovements = await getInventoryMovements();
+        const mapped = latestMovements.map((movement, index) => ({
+          id: typeof movement.id === 'string' ? movement.id : `${Date.now()}-${index}`,
+          product: movement.productName ?? movement.productId ?? 'Produto',
+          type: normalizeMovementType(movement.type),
+          quantity: typeof movement.quantity === 'number' ? movement.quantity : 0,
+          source: movement.source ?? 'Movimentacao API',
+          createdAt: movement.createdAt ?? new Date().toISOString(),
+        }));
+
+        setApiMovements(mapped);
+      } catch {
+        setApiMovements(null);
+      }
+
+      setImportFeedback('Importacao enviada para API com sucesso.');
+      setUsingLocalStockFallback(false);
+      event.target.value = '';
+    } catch {
+      // fallback local para demonstracao enquanto o endpoint de importacao nao esta disponivel
+      try {
+        const text = await file.text();
+        const rows = parseCsvRows(text);
+        applyImportedRowsLocally(rows);
+        setImportFeedback('API indisponivel. A importacao foi simulada localmente.');
+        setUsingLocalStockFallback(true);
+      } catch (parseError) {
+        setImportError(getApiErrorMessage(parseError));
+      }
+
+      event.target.value = '';
+    } finally {
+      setIsSyncingStock('');
+    }
+  };
+
+  const effectiveMovements = apiMovements ?? movements;
+
   const filteredMovements = useMemo(() => {
-    return movements
+    return effectiveMovements
       .filter(movement => {
         if (movementTypeFilter !== 'ALL' && movement.type !== movementTypeFilter) {
           return false;
@@ -306,7 +504,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
         return true;
       })
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  }, [movements, movementTypeFilter, startDate, endDate]);
+  }, [effectiveMovements, movementTypeFilter, startDate, endDate]);
 
   const filteredStock = stock.filter(item => {
     const available = item.total - item.reservado;
@@ -320,7 +518,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       const searchLower = searchTerm.toLowerCase();
       const matchesCodigo = item.codigo.toLowerCase().includes(searchLower);
       const matchesProduto = item.produto.toLowerCase().includes(searchLower);
-      
+
       if (!matchesCodigo && !matchesProduto) {
         return false;
       }
@@ -329,11 +527,11 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     return true;
   });
 
-  const handleAddNewProduct = () => {
+  const handleAddNewProduct = async () => {
     const { codigo, produto, total, reservado, fotoUrl } = newProduct;
 
     if (!codigo.trim() || !produto.trim()) {
-      setImportFeedback('Código e descrição são obrigatórios.');
+      setImportFeedback('Codigo e descricao sao obrigatorios.');
       return;
     }
 
@@ -341,54 +539,69 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     const reservadoNum = Number(reservado);
 
     if (!Number.isFinite(totalNum) || !Number.isFinite(reservadoNum) || totalNum < 0 || reservadoNum < 0) {
-      setImportFeedback('Valores inválidos. Use números positivos.');
+      setImportFeedback('Valores invalidos. Use numeros positivos.');
       return;
     }
 
     if (reservadoNum > totalNum) {
-      setImportFeedback('Reservado não pode ser maior que total.');
+      setImportFeedback('Reservado nao pode ser maior que total.');
       return;
     }
 
-    // Check if product already exists
     if (stock.some(item => item.codigo.toLowerCase() === codigo.toLowerCase())) {
-      setImportFeedback('Produto com este código já existe.');
+      setImportFeedback('Produto com este codigo ja existe.');
       return;
     }
 
-    setStock(currentStock => [
-      ...currentStock,
-      {
-        codigo,
-        produto,
-        total: totalNum,
-        reservado: reservadoNum,
-        fotoUrl: fotoUrl || undefined,
+    const localInsert = () => {
+      setStock(currentStock => [
+        ...currentStock,
+        {
+          codigo,
+          produto,
+          total: totalNum,
+          reservado: reservadoNum,
+          fotoUrl: fotoUrl || undefined,
+        },
+      ]);
+
+      const movementsToRegister: Array<Omit<StockMovement, 'id' | 'createdAt'>> = [];
+      if (totalNum > 0) {
+        movementsToRegister.push({
+          product: produto,
+          type: 'ENTRY',
+          quantity: totalNum,
+          source: 'Novo produto cadastrado',
+        });
+      }
+      if (reservadoNum > 0) {
+        movementsToRegister.push({
+          product: produto,
+          type: 'RESERVATION',
+          quantity: reservadoNum,
+          source: 'Novo produto cadastrado',
+        });
+      }
+
+      if (movementsToRegister.length > 0) {
+        onRegisterMovements(movementsToRegister);
+      }
+    };
+
+    await runWithFallback(
+      `create-product:${codigo}`,
+      async () => {
+        await createProduct({
+          name: produto,
+          sku: codigo,
+          price: 0,
+          description: fotoUrl ? 'Produto com foto cadastrada no painel' : undefined,
+        });
+
+        localInsert();
       },
-    ]);
-
-    // Register movement
-    const movementsToRegister: Array<Omit<StockMovement, 'id' | 'createdAt'>> = [];
-    if (totalNum > 0) {
-      movementsToRegister.push({
-        product: produto,
-        type: 'ENTRY',
-        quantity: totalNum,
-        source: 'Novo produto cadastrado',
-      });
-    }
-    if (reservadoNum > 0) {
-      movementsToRegister.push({
-        product: produto,
-        type: 'RESERVATION',
-        quantity: reservadoNum,
-        source: 'Novo produto cadastrado',
-      });
-    }
-
-    if (movementsToRegister.length > 0) {
-      onRegisterMovements(movementsToRegister);
-    }
+      localInsert,
+    );
 
     setImportFeedback(`Produto "${produto}" cadastrado com sucesso!`);
     setNewProduct({ codigo: '', produto: '', total: '0', reservado: '0', fotoUrl: '' });
@@ -407,7 +620,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     });
   };
 
-  const handleSaveProductFromModal = () => {
+  const handleSaveProductFromModal = async () => {
     if (!editingProduct) {
       return;
     }
@@ -419,17 +632,17 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     const fotoUrl = editingProduct.fotoUrl.trim();
 
     if (!codigo || !produto) {
-      setEditModalError('Código e descrição são obrigatórios.');
+      setEditModalError('Codigo e descricao sao obrigatorios.');
       return;
     }
 
     if (!Number.isFinite(total) || !Number.isFinite(reservado) || total < 0 || reservado < 0) {
-      setEditModalError('Valores inválidos. Use números positivos.');
+      setEditModalError('Valores invalidos. Use numeros positivos.');
       return;
     }
 
     if (reservado > total) {
-      setEditModalError('Reservado não pode ser maior que total.');
+      setEditModalError('Reservado nao pode ser maior que total.');
       return;
     }
 
@@ -437,13 +650,13 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       item => item.codigo.toLowerCase() === codigo.toLowerCase() && item.codigo !== editingProduct.originalCodigo,
     );
     if (duplicateCode) {
-      setEditModalError('Já existe um produto com este código.');
+      setEditModalError('Ja existe um produto com este codigo.');
       return;
     }
 
     const previous = stock.find(item => item.codigo === editingProduct.originalCodigo);
     if (!previous) {
-      setEditModalError('Produto não encontrado para edição.');
+      setEditModalError('Produto nao encontrado para edicao.');
       return;
     }
 
@@ -456,14 +669,14 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
         product: produto,
         type: 'ENTRY',
         quantity: totalDiff,
-        source: 'Ajuste via edição do produto',
+        source: 'Ajuste via edicao do produto',
       });
     } else if (totalDiff < 0) {
       movementsToRegister.push({
         product: produto,
         type: 'EXIT',
         quantity: Math.abs(totalDiff),
-        source: 'Ajuste via edição do produto',
+        source: 'Ajuste via edicao do produto',
       });
     }
 
@@ -472,37 +685,95 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
         product: produto,
         type: 'RESERVATION',
         quantity: reservedDiff,
-        source: 'Ajuste via edição do produto',
+        source: 'Ajuste via edicao do produto',
       });
     } else if (reservedDiff < 0) {
       movementsToRegister.push({
         product: produto,
         type: 'RELEASE',
         quantity: Math.abs(reservedDiff),
-        source: 'Ajuste via edição do produto',
+        source: 'Ajuste via edicao do produto',
       });
     }
 
-    setStock(currentStock =>
-      currentStock.map(item =>
-        item.codigo === editingProduct.originalCodigo
-          ? {
-              ...item,
-              codigo,
-              produto,
-              total,
-              reservado,
-              fotoUrl: fotoUrl || undefined,
-            }
-          : item,
-      ),
+    const productId = String(getStockProductId(previous));
+
+    const localUpdate = () => {
+      updateStockItemLocally(productId, {
+        codigo,
+        produto,
+        total,
+        reservado,
+        fotoUrl: fotoUrl || undefined,
+      });
+
+      if (movementsToRegister.length > 0) {
+        onRegisterMovements(movementsToRegister);
+      }
+    };
+
+    await runWithFallback(
+      `update-product:${productId}`,
+      async () => {
+        await updateProduct(productId, {
+          name: produto,
+          sku: codigo,
+          active: true,
+        });
+
+        await updateInventory(productId, buildInventoryUpdatePayload(previous, {
+          total,
+          reservado,
+        }));
+
+        localUpdate();
+      },
+      localUpdate,
     );
 
-    if (movementsToRegister.length > 0) {
-      onRegisterMovements(movementsToRegister);
+    setImportFeedback(`Produto "${produto}" atualizado com sucesso.`);
+    setEditingProduct(null);
+    setEditModalError('');
+  };
+
+  const handleDeleteProductFromModal = async () => {
+    if (!editingProduct) {
+      return;
     }
 
-    setImportFeedback(`Produto "${produto}" atualizado com sucesso.`);
+    const previous = stock.find(item => item.codigo === editingProduct.originalCodigo);
+    if (!previous) {
+      setEditModalError('Produto nao encontrado para exclusao.');
+      return;
+    }
+
+    const productId = String(getStockProductId(previous));
+
+    const localDelete = () => {
+      setStock(currentStock => currentStock.filter(item => getStockProductId(item) !== productId));
+
+      if (previous.total > 0) {
+        onRegisterMovements([
+          {
+            product: previous.produto,
+            type: 'EXIT',
+            quantity: previous.total,
+            source: 'Produto removido do catalogo',
+          },
+        ]);
+      }
+    };
+
+    await runWithFallback(
+      `delete-product:${productId}`,
+      async () => {
+        await deleteProduct(productId);
+        localDelete();
+      },
+      localDelete,
+    );
+
+    setImportFeedback(`Produto "${previous.produto}" removido.`);
     setEditingProduct(null);
     setEditModalError('');
   };
@@ -521,7 +792,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
               <span className="text-gray-500">🔍</span>
               <input
                 type="text"
-                placeholder="Buscar código ou produto..."
+                placeholder="Buscar codigo ou produto..."
                 value={searchTerm}
                 onChange={event => setSearchTerm(event.target.value)}
                 className="bg-transparent text-xs text-white dark:text-white light:text-gray-900 outline-none flex-1 md:w-48"
@@ -539,7 +810,8 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
             <button
               type="button"
               onClick={() => setShowNewProductForm(!showNewProductForm)}
-              className="text-xs px-3 py-2 rounded-md border border-[#2a2a2a] light:border-gray-300 text-gray-300 light:text-gray-700 hover:bg-[#1a1a1a] dark:hover:bg-[#1a1a1a] light:hover:bg-gray-100 transition-colors"
+              disabled={Boolean(isSyncingStock)}
+              className="text-xs px-3 py-2 rounded-md border border-[#2a2a2a] light:border-gray-300 text-gray-300 light:text-gray-700 hover:bg-[#1a1a1a] dark:hover:bg-[#1a1a1a] light:hover:bg-gray-100 transition-colors disabled:opacity-60"
             >
               {showNewProductForm ? '✕ Cancelar' : '+ Novo produto'}
             </button>
@@ -548,17 +820,35 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
               onClick={() => setShowMovementHistory(!showMovementHistory)}
               className="text-xs px-3 py-2 rounded-md border border-[#2a2a2a] light:border-gray-300 text-gray-300 light:text-gray-700 hover:bg-[#1a1a1a] dark:hover:bg-[#1a1a1a] light:hover:bg-gray-100 transition-colors"
             >
-              {showMovementHistory ? '✕ Fechar histórico' : '+ Histórico de movimentações'}
+              {showMovementHistory ? '✕ Fechar historico' : '+ Historico de movimentacoes'}
             </button>
             <label className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-md border border-[#2a2a2a] light:border-gray-300 text-gray-300 light:text-gray-700 cursor-pointer hover:bg-[#1a1a1a] dark:hover:bg-[#1a1a1a] light:hover:bg-gray-100 transition-colors">
               Importar CSV
-              <input type="file" accept=".csv" className="hidden" onChange={handleImportCsv} />
+              <input type="file" accept=".csv" className="hidden" onChange={handleImportCsv} disabled={isSyncingStock === 'import-csv'} />
             </label>
           </div>
         </div>
 
+        {isSyncingStock && (
+          <p className="px-5 py-3 text-xs text-gray-400 light:text-gray-600 border-b border-[#222222] light:border-gray-200">Sincronizando alteracao de estoque...</p>
+        )}
+
+        {stockActionError && (
+          <p className="px-5 py-3 text-xs text-amber-300 light:text-amber-700 border-b border-[#222222] light:border-gray-200">{stockActionError}</p>
+        )}
+
+        {usingLocalStockFallback && (
+          <p className="px-5 py-3 text-xs text-amber-300 light:text-amber-700 border-b border-[#222222] light:border-gray-200">
+            API indisponivel. Algumas alteracoes estao sendo simuladas localmente.
+          </p>
+        )}
+
         {importFeedback && (
           <p className="px-5 py-3 text-sm text-[#00ff66] light:text-green-700 border-b border-[#222222] light:border-gray-200">{importFeedback}</p>
+        )}
+
+        {importError && (
+          <p className="px-5 py-3 text-sm text-red-400 light:text-red-700 border-b border-[#222222] light:border-gray-200">{importError}</p>
         )}
 
         {showNewProductForm && (
@@ -566,7 +856,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
             <h3 className="text-sm font-semibold !text-white dark:!text-white light:!text-gray-900 mb-3">Cadastrar novo produto</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
               <div>
-                <label className="text-xs text-gray-400 light:text-gray-600">Código</label>
+                <label className="text-xs text-gray-400 light:text-gray-600">Codigo</label>
                 <input
                   type="text"
                   value={newProduct.codigo}
@@ -576,7 +866,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                 />
               </div>
               <div>
-                <label className="text-xs text-gray-400 light:text-gray-600">Descrição</label>
+                <label className="text-xs text-gray-400 light:text-gray-600">Descricao</label>
                 <input
                   type="text"
                   value={newProduct.produto}
@@ -637,7 +927,8 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
             <button
               type="button"
               onClick={handleAddNewProduct}
-              className="text-xs px-3 py-2 rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 hover:bg-[#00ff66]/25 transition-colors mt-3"
+              disabled={Boolean(isSyncingStock)}
+              className="text-xs px-3 py-2 rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 hover:bg-[#00ff66]/25 transition-colors mt-3 disabled:opacity-60"
             >
               ✓ Cadastrar produto
             </button>
@@ -648,7 +939,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
           <table className="w-full min-w-[760px]">
             <thead>
               <tr className="border-b border-[#222222] light:border-gray-200 text-left">
-                <th className="px-5 py-3 text-xs uppercase tracking-wide text-gray-500">Código</th>
+                <th className="px-5 py-3 text-xs uppercase tracking-wide text-gray-500">Codigo</th>
                 <th className="px-5 py-3 text-xs uppercase tracking-wide text-gray-500">Produto</th>
                 <th className="px-5 py-3 text-xs uppercase tracking-wide text-gray-500">Total</th>
                 <th className="px-5 py-3 text-xs uppercase tracking-wide text-gray-500">Reservado</th>
@@ -661,6 +952,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                 const available = item.total - item.reservado;
                 const isLowStock = available <= 20;
                 const rowEdit = editableRows[item.produto] ?? { total: String(item.total), reserved: String(item.reservado) };
+                const rowSyncKey = `save-row:${String(getStockProductId(item))}`;
 
                 return (
                   <tr key={item.produto} className={`border-b border-[#222222] light:border-gray-200 transition-colors ${isLowStock ? 'bg-amber-500/10 dark:bg-amber-500/10 light:bg-amber-50' : ''}`}>
@@ -713,7 +1005,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                       {isLowStock ? (
                         <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md bg-amber-500/30 dark:bg-amber-500/30 light:bg-amber-200 border border-amber-400 dark:border-amber-400 light:border-amber-600">
                           <span className="font-semibold text-amber-300 dark:text-amber-300 light:text-amber-900">{available}</span>
-                          <span className="text-xs text-amber-400 dark:text-amber-400 light:text-amber-700 font-semibold">CRÍTICO</span>
+                          <span className="text-xs text-amber-400 dark:text-amber-400 light:text-amber-700 font-semibold">CRITICO</span>
                         </div>
                       ) : (
                         <span className="text-gray-300 light:text-gray-700">{available}</span>
@@ -723,15 +1015,19 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => handleSaveRow(item.produto)}
-                          className="text-xs px-2.5 py-1 rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 hover:bg-[#00ff66]/25 transition-colors"
+                          onClick={() => {
+                            void handleSaveRow(item.produto);
+                          }}
+                          disabled={isSyncingStock === rowSyncKey}
+                          className="text-xs px-2.5 py-1 rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 hover:bg-[#00ff66]/25 transition-colors disabled:opacity-60"
                         >
                           Salvar
                         </button>
                         <button
                           type="button"
                           onClick={() => handleOpenEditModal(item)}
-                          className="text-xs px-2.5 py-1 rounded-md bg-sky-500/15 text-sky-300 light:bg-sky-100 light:text-sky-700 hover:bg-sky-500/25 transition-colors"
+                          disabled={Boolean(isSyncingStock)}
+                          className="text-xs px-2.5 py-1 rounded-md bg-sky-500/15 text-sky-300 light:bg-sky-100 light:text-sky-700 hover:bg-sky-500/25 transition-colors disabled:opacity-60"
                         >
                           Editar
                         </button>
@@ -819,7 +1115,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
               <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs text-gray-400 light:text-gray-600">Código</label>
+                  <label className="text-xs text-gray-400 light:text-gray-600">Codigo</label>
                   <input
                     type="text"
                     value={editingProduct.codigo}
@@ -829,7 +1125,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                 </div>
 
                 <div>
-                  <label className="text-xs text-gray-400 light:text-gray-600">Descrição</label>
+                  <label className="text-xs text-gray-400 light:text-gray-600">Descricao</label>
                   <input
                     type="text"
                     value={editingProduct.produto}
@@ -905,10 +1201,23 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                 </button>
                 <button
                   type="button"
-                  onClick={handleSaveProductFromModal}
-                  className="text-xs px-3 py-2 rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 hover:bg-[#00ff66]/25 transition-colors"
+                  onClick={() => {
+                    void handleDeleteProductFromModal();
+                  }}
+                  disabled={Boolean(isSyncingStock)}
+                  className="text-xs px-3 py-2 rounded-md border border-rose-500/50 text-rose-300 light:text-rose-700 hover:bg-rose-500/10 transition-colors disabled:opacity-60"
                 >
-                  Salvar alterações
+                  Excluir produto
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleSaveProductFromModal();
+                  }}
+                  disabled={Boolean(isSyncingStock)}
+                  className="text-xs px-3 py-2 rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 hover:bg-[#00ff66]/25 transition-colors disabled:opacity-60"
+                >
+                  Salvar alteracoes
                 </button>
               </div>
             </div>

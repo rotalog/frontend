@@ -121,8 +121,23 @@ export function RegisterPage({ theme, toggleTheme, onRegister }: RegisterPagePro
         longitude: -46.6333,
       });
 
+      const hasSessionUser = typeof auth.user?.id === 'string'
+        ? auth.user.id.trim().length > 0
+        : typeof auth.user?.id === 'number';
+
       onRegister(auth);
-      navigate('/dashboard');
+
+      if (hasSessionUser) {
+        navigate('/dashboard');
+        return;
+      }
+
+      navigate('/login', {
+        replace: true,
+        state: {
+          infoMessage: 'Cadastro concluido. Entre com seu e-mail e senha para continuar.',
+        },
+      });
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : 'Nao foi possivel concluir cadastro.');
     } finally {

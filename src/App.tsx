@@ -4,15 +4,14 @@ import { useTheme } from './hooks/useTheme';
 import { DashboardPage } from './pages/DashboardPage';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
-import type { AuthResult } from './services/auth';
+import type { AuthResult, AuthenticatedUser } from './services/auth';
 import { getCompanyNameFromUser, getCurrentUser, logoutSupplier } from './services/auth';
 
 function App() {
   const { theme, toggleTheme } = useTheme();
-  // ALTERACAO: sessao agora vem do backend (cookie HttpOnly), nao de localStorage.
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [companyName, setCompanyName] = useState('Fornecedor');
-  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState<AuthenticatedUser | null>(null);
+  const [companyName, setCompanyName] = useState<string>('');
+  const [isLoadingAuth, setIsLoadingAuth] = useState(true);
 
   useEffect(() => {
     let active = true;
@@ -24,18 +23,18 @@ function App() {
           return;
         }
 
+        setCurrentUser(user);
         setCompanyName(getCompanyNameFromUser(user));
-        setIsAuthenticated(true);
       } catch {
         if (!active) {
           return;
         }
 
-        setCompanyName('Fornecedor');
-        setIsAuthenticated(false);
+        setCurrentUser(null);
+        setCompanyName('');
       } finally {
         if (active) {
-          setIsAuthLoading(false);
+          setIsLoadingAuth(false);
         }
       }
     };
@@ -47,22 +46,38 @@ function App() {
     };
   }, []);
 
-  const handleLogin = ({ companyName: loggedCompany }: AuthResult) => {
-    setCompanyName(loggedCompany);
-    setIsAuthenticated(true);
+  const handleLogin = (result: AuthResult) => {
+    setCurrentUser(result.user);
+    setCompanyName(result.companyName);
   };
 
-  const handleLogout = () => {
-    // ALTERACAO: invalida sessao no backend e limpa estado local.
-    void logoutSupplier().catch(() => undefined);
-    setCompanyName('Fornecedor');
-    setIsAuthenticated(false);
+  const handleRegister = (result: AuthResult) => {
+    const hasSessionUser = typeof result.user?.id === 'string'
+      ? result.user.id.trim().length > 0
+      : typeof result.user?.id === 'number';
+
+    if (!hasSessionUser) {
+      setCurrentUser(null);
+      setCompanyName('');
+      return;
+    }
+
+    setCurrentUser(result.user);
+    setCompanyName(result.companyName);
   };
 
-  if (isAuthLoading) {
+  const handleLogout = async () => {
+    await logoutSupplier().catch(() => undefined);
+    setCurrentUser(null);
+    setCompanyName('');
+  };
+
+  const isAuthenticated = currentUser !== null;
+
+  if (isLoadingAuth) {
     return (
       <div className="min-h-screen w-full bg-[#050505] dark:bg-[#050505] light:bg-gray-50 flex items-center justify-center text-sm text-gray-300 light:text-gray-700">
-        Validando sessao...
+        Carregando sessao...
       </div>
     );
   }
@@ -84,7 +99,7 @@ function App() {
           element={
             isAuthenticated
               ? <Navigate to="/dashboard" replace />
-              : <RegisterPage theme={theme} toggleTheme={toggleTheme} onRegister={handleLogin} />
+              : <RegisterPage theme={theme} toggleTheme={toggleTheme} onRegister={handleRegister} />
           }
         />
         <Route

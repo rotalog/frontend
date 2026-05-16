@@ -3,7 +3,21 @@ import { Sidebar, type DashboardSection } from '../Components/Sidebar';
 import { OrderTable } from '../Components/OrderTable';
 import { StockManagementSection } from '../Components/StockManagementSection';
 import { mockOrders, mockStock } from '../data/mockData';
+import { getInventory } from '../services/inventory';
+import { getOrders } from '../services/orders';
+import { getDashboardReport } from '../services/reports';
+import { getTodayRoute } from '../services/routes';
+import type { ApiInventoryItem } from '../types/inventory';
+import type { ApiRoute } from '../types/routes';
 import type { Order, OrderStatus, StockMovement } from '../types/orders';
+import type { ApiOrder } from '../types/orders';
+import type { DashboardReport } from '../types/reports';
+import {
+  calculateFallbackKpis,
+  getNumberValue,
+  mapApiInventoryToLegacyStock,
+  mapApiOrderToLegacyOrder,
+} from '../utils/dashboardMappers';
 
 interface DashboardPageProps {
   theme: 'dark' | 'light';
@@ -97,8 +111,98 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   const [stockNotice, setStockNotice] = useState('Novo pedido recebido - Mercado Central');
   const [stock, setStock] = useState(mockStock);
   const [stockMovements, setStockMovements] = useState<StockMovement[]>([]);
+  const [isLoadingDashboard, setIsLoadingDashboard] = useState(true);
+  const [dashboardError, setDashboardError] = useState('');
+  const [dashboardReport, setDashboardReport] = useState<DashboardReport | null>(null);
+  const [apiOrders, setApiOrders] = useState<ApiOrder[]>([]);
+  const [apiInventory, setApiInventory] = useState<ApiInventoryItem[]>([]);
+  const [todayRoute, setTodayRoute] = useState<ApiRoute | null>(null);
+  const [usingMockFallback, setUsingMockFallback] = useState(false);
 
   useEffect(() => {
+    let active = true;
+
+    const loadDashboardData = async () => {
+      setIsLoadingDashboard(true);
+      setDashboardError('');
+
+      const [reportResult, ordersResult, inventoryResult, routeResult] = await Promise.allSettled([
+        getDashboardReport(),
+        getOrders(),
+        getInventory(),
+        getTodayRoute(),
+      ]);
+
+      if (!active) {
+        return;
+      }
+
+      let hasSuccess = false;
+      let hasMockFallback = false;
+
+      if (reportResult.status === 'fulfilled') {
+        setDashboardReport(reportResult.value);
+        hasSuccess = true;
+      } else {
+        setDashboardReport(null);
+      }
+
+      if (ordersResult.status === 'fulfilled') {
+        setApiOrders(ordersResult.value);
+        setOverviewOrders(ordersResult.value.map(mapApiOrderToLegacyOrder));
+        hasSuccess = true;
+      } else {
+        setApiOrders([]);
+        setOverviewOrders(mockOrders);
+        hasMockFallback = true;
+      }
+
+      if (inventoryResult.status === 'fulfilled') {
+        setApiInventory(inventoryResult.value);
+        setStock(inventoryResult.value.map(mapApiInventoryToLegacyStock));
+        hasSuccess = true;
+      } else {
+        setApiInventory([]);
+        setStock(mockStock);
+        hasMockFallback = true;
+      }
+
+      if (routeResult.status === 'fulfilled') {
+        setTodayRoute(routeResult.value);
+        hasSuccess = true;
+      } else {
+        setTodayRoute(null);
+      }
+
+      const hasPartialError = [reportResult, ordersResult, inventoryResult, routeResult]
+        .some(result => result.status === 'rejected');
+
+      if (!hasSuccess) {
+        hasMockFallback = true;
+        setOverviewOrders(mockOrders);
+        setStock(mockStock);
+      }
+
+      if (!hasSuccess || hasPartialError) {
+        setDashboardError('Nao foi possivel carregar todos os dados da API. Alguns dados demonstrativos estao sendo exibidos.');
+      }
+
+      setUsingMockFallback(hasMockFallback);
+      setIsLoadingDashboard(false);
+    };
+
+    void loadDashboardData();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!usingMockFallback) {
+      return;
+    }
+
     const timeoutId = window.setTimeout(() => {
       const realtimeOrder: Order = {
         id: 'PED-1130',
@@ -119,7 +223,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     }, 8000);
 
     return () => window.clearTimeout(timeoutId);
-  }, []);
+  }, [usingMockFallback]);
 
   const headerTitle = useMemo(() => {
     switch (activeSection) {
@@ -142,20 +246,57 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     return topNavItems.find(item => item.tab === activeOverviewTab)?.label ?? 'Visão geral';
   }, [activeOverviewTab]);
 
+  const fallbackKpis = useMemo(() => {
+    return calculateFallbackKpis(overviewOrders, stock);
+  }, [overviewOrders, stock]);
+
+  const dashboardKpis = useMemo(() => {
+    const source = dashboardReport as Record<string, unknown> | null;
+    const revenueToday = getNumberValue(source, ['totalRevenue', 'faturamentoTotal', 'revenueToday'], fallbackKpis.revenueToday);
+    const totalOrders = getNumberValue(source, ['totalOrders', 'pedidosTotal'], fallbackKpis.totalOrders);
+    const pendingOrders = getNumberValue(source, ['pendingOrders', 'pedidosPendentes'], fallbackKpis.pendingOrders);
+    const preparingOrders = getNumberValue(source, ['preparingOrders', 'pedidosEmSeparacao'], fallbackKpis.preparingOrders);
+    const acceptanceRate = getNumberValue(source, ['acceptanceRate', 'taxaAceite'], fallbackKpis.acceptanceRate);
+    const lowStockCount = getNumberValue(source, ['lowStockCount', 'estoqueBaixo'], fallbackKpis.lowStockCount);
+
+    const rawTopProducts = source?.topProducts;
+    const mappedTopProducts = Array.isArray(rawTopProducts)
+      ? rawTopProducts.map(item => {
+        const product = (item && typeof item === 'object') ? item as Record<string, unknown> : {};
+        return {
+          name: String(product.name ?? product.productName ?? product.nome ?? 'Produto'),
+          percent: getNumberValue(product, ['percent', 'percentage', 'share'], 0),
+        };
+      })
+      : fallbackKpis.topProducts;
+
+    return {
+      revenueToday,
+      totalOrders,
+      pendingOrders,
+      preparingOrders,
+      acceptanceRate,
+      lowStockCount,
+      monthlyOrders: totalOrders,
+      deliveriesInProgress: fallbackKpis.deliveriesInProgress,
+      topProducts: mappedTopProducts.length > 0 ? mappedTopProducts : fallbackKpis.topProducts,
+    };
+  }, [dashboardReport, fallbackKpis]);
+
   const reportSummary = useMemo(() => {
-    const accepted = mockOrders.filter(order => order.status !== 'RECUSADO').length;
-    const rejected = mockOrders.filter(order => order.status === 'RECUSADO').length;
-    const preparing = mockOrders.filter(order => order.status === 'EM_SEPARACAO').length;
-    const revenue = mockOrders
+    const accepted = overviewOrders.filter(order => order.status !== 'RECUSADO').length;
+    const rejected = overviewOrders.filter(order => order.status === 'RECUSADO').length;
+    const preparing = overviewOrders.filter(order => order.status === 'EM_SEPARACAO').length;
+    const revenue = overviewOrders
       .filter(order => order.status !== 'RECUSADO')
       .reduce((sum, order) => sum + order.valorTotal, 0);
 
     return { accepted, rejected, preparing, revenue };
-  }, []);
+  }, [overviewOrders]);
 
   const deliveriesToday = useMemo(() => {
-    return mockOrders.filter(order => order.status === 'SAIU_PARA_ENTREGA' || order.status === 'ENTREGUE');
-  }, []);
+    return overviewOrders.filter(order => order.status === 'SAIU_PARA_ENTREGA' || order.status === 'ENTREGUE');
+  }, [overviewOrders]);
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('pt-BR', {
@@ -284,40 +425,6 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   const completedDeliveries = useMemo(() => {
     return deliveryOrders.filter(order => order.status === 'ENTREGUE').length;
   }, [deliveryOrders]);
-
-  const dashboardReport = useMemo(() => {
-    const validOrders = overviewOrders.filter(order => order.status !== 'RECUSADO');
-    const acceptedOrders = overviewOrders.filter(order => (
-      order.status !== 'SOLICITADO' && order.status !== 'RECUSADO'
-    ));
-    const revenueToday = validOrders.reduce((sum, order) => sum + order.valorTotal, 0);
-    const acceptanceRate = overviewOrders.length > 0
-      ? Math.round((acceptedOrders.length / overviewOrders.length) * 100)
-      : 0;
-
-    const productTotals = validOrders.reduce<Record<string, number>>((acc, order) => {
-      order.itens.forEach(item => {
-        acc[item.nome] = (acc[item.nome] ?? 0) + item.quantidade;
-      });
-      return acc;
-    }, {});
-
-    const maxProductTotal = Math.max(...Object.values(productTotals), 1);
-    const topProducts = Object.entries(productTotals)
-      .sort(([, firstTotal], [, secondTotal]) => secondTotal - firstTotal)
-      .slice(0, 4)
-      .map(([name, total]) => ({
-        name,
-        percent: Math.round((total / maxProductTotal) * 100),
-      }));
-
-    return {
-      revenueToday,
-      acceptanceRate,
-      monthlyOrders: validOrders.length,
-      topProducts,
-    };
-  }, [overviewOrders]);
 
   const renderOverviewContent = () => {
     if (activeOverviewTab === 'PEDIDOS') {
@@ -637,16 +744,16 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
             <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
               <div className="rounded-lg bg-[#181818] p-6 light:bg-gray-50">
                 <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">
-                  {formatCurrency(dashboardReport.revenueToday)}
+                  {formatCurrency(dashboardKpis.revenueToday)}
                 </h3>
                 <p className="mt-3 text-xs text-gray-500 light:text-gray-600">Faturado hoje</p>
               </div>
               <div className="rounded-lg bg-[#181818] p-6 light:bg-gray-50">
-                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{dashboardReport.acceptanceRate}%</h3>
+                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{dashboardKpis.acceptanceRate}%</h3>
                 <p className="mt-3 text-xs text-gray-500 light:text-gray-600">Taxa de aceite</p>
               </div>
               <div className="rounded-lg bg-[#181818] p-6 light:bg-gray-50">
-                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{dashboardReport.monthlyOrders}</h3>
+                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{dashboardKpis.monthlyOrders}</h3>
                 <p className="mt-3 text-xs text-gray-500 light:text-gray-600">Pedidos/mês</p>
               </div>
             </div>
@@ -654,7 +761,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
             <div className="mt-8 border-t border-[#222222] pt-7 light:border-gray-200">
               <p className="mb-5 text-xs uppercase tracking-wide text-gray-500 light:text-gray-600">Mais pedidos esta semana</p>
               <div className="space-y-5">
-                {dashboardReport.topProducts.map(product => (
+                {dashboardKpis.topProducts.map(product => (
                   <div key={product.name} className="grid grid-cols-1 sm:grid-cols-[180px_1fr_52px] sm:items-center gap-2 sm:gap-5">
                     <span className="truncate text-sm text-gray-400 light:text-gray-700">{product.name}</span>
                     <div className="h-2.5 rounded-full bg-[#262626] light:bg-gray-200">
@@ -680,10 +787,10 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     return (
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
         {[
-          { label: 'Novos Pedidos', value: '12' },
-          { label: 'Em Preparo', value: '05' },
-          { label: 'Saindo Hoje', value: '08' },
-          { label: 'Faturado (Mês)', value: 'R$ 4.500' },
+          { label: 'Novos Pedidos', value: String(dashboardKpis.pendingOrders) },
+          { label: 'Em Preparo', value: String(dashboardKpis.preparingOrders) },
+          { label: 'Saindo Hoje', value: String(dashboardKpis.deliveriesInProgress) },
+          { label: 'Faturado (Mês)', value: formatCurrency(dashboardKpis.revenueToday) },
         ].map(card => (
           <div key={card.label} className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
             <p className="text-gray-500 light:text-gray-400 text-sm">{card.label}</p>
@@ -696,7 +803,15 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
   const renderSectionContent = () => {
     if (activeSection === 'PEDIDOS') {
-      return <OrderTable stock={stock} setStock={setStock} onRegisterStockMovements={registerStockMovements} />;
+      return (
+        <OrderTable
+          orders={overviewOrders}
+          onOrdersChange={setOverviewOrders}
+          stock={stock}
+          setStock={setStock}
+          onRegisterStockMovements={registerStockMovements}
+        />
+      );
     }
 
     if (activeSection === 'ESTOQUE') {
@@ -773,6 +888,8 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     activeOverviewTab === 'RELATORIOS'
   );
 
+  const hasApiData = apiOrders.length > 0 || apiInventory.length > 0 || Boolean(dashboardReport) || Boolean(todayRoute);
+
   return (
     <div className="flex w-full min-h-screen bg-[#050505] dark:bg-[#050505] light:bg-gray-50 transition-colors duration-300">
       <Sidebar
@@ -784,6 +901,27 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       />
 
       <main className="flex-1 p-4 md:p-8 overflow-x-hidden">
+        {isLoadingDashboard && (
+          <div className="mb-6 rounded-xl border border-[#222222] light:border-gray-200 bg-[#0d0d0d] dark:bg-[#0d0d0d] light:bg-white p-4 text-sm text-gray-300 light:text-gray-700">
+            Carregando dados do painel...
+          </div>
+        )}
+
+        {!isLoadingDashboard && dashboardError && (
+          <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 light:bg-amber-100 light:text-amber-700">
+            Nao foi possivel carregar todos os dados da API. Alguns dados demonstrativos estao sendo exibidos.
+            {hasApiData ? ' Dados da API foram carregados parcialmente.' : ''}
+          </div>
+        )}
+
+        {!isLoadingDashboard && usingMockFallback && (
+          <div className="mb-6 rounded-xl border border-[#222222] light:border-gray-200 bg-[#0d0d0d] dark:bg-[#0d0d0d] light:bg-white p-3 text-xs text-gray-400 light:text-gray-600">
+            Exibindo dados demonstrativos. A API ainda nao esta disponivel.
+          </div>
+        )}
+
+        {isLoadingDashboard ? null : (
+          <>
         {activeSection === 'VISAO_GERAL' && (
           <div className="mb-6 rounded-xl border border-[#222222] light:border-gray-200 bg-[#0d0d0d] dark:bg-[#0d0d0d] light:bg-white p-4">
             <p className="text-xs text-gray-400 light:text-gray-600 mb-3">Dashboard / {activeOverviewLabel}</p>
@@ -826,6 +964,8 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         </header>}
 
         {renderSectionContent()}
+          </>
+        )}
       </main>
     </div>
   );

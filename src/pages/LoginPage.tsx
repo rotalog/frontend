@@ -1,7 +1,7 @@
 import { Moon, Sun } from 'lucide-react';
 import { useState } from 'react';
 import type { FormEvent } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import type { AuthResult } from '../services/auth';
 import { loginSupplier } from '../services/auth';
 
@@ -13,6 +13,15 @@ interface LoginPageProps {
 
 export function LoginPage({ theme, toggleTheme, onLogin }: LoginPageProps) {
   const navigate = useNavigate();
+  const location = useLocation();
+  const infoMessage = (
+    location.state &&
+    typeof location.state === 'object' &&
+    'infoMessage' in location.state &&
+    typeof location.state.infoMessage === 'string'
+  )
+    ? location.state.infoMessage
+    : '';
   const [email, setEmail] = useState('');
   const [senha, setSenha] = useState('');
   const [formError, setFormError] = useState('');
@@ -74,6 +83,10 @@ export function LoginPage({ theme, toggleTheme, onLogin }: LoginPageProps) {
         </div>
 
         <form onSubmit={handleLogin} className="space-y-4">
+          {infoMessage && (
+            <p className="text-sm text-emerald-400 light:text-emerald-700">{infoMessage}</p>
+          )}
+
           <div>
             <label htmlFor="email" className="block text-sm font-medium text-gray-200 light:text-gray-700 mb-1">E-mail</label>
             <input
