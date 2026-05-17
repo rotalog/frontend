@@ -1,4 +1,6 @@
-export const API_URL = (import.meta.env.VITE_API_URL ?? '/api/v1').replace(/\/$/, '');
+const DEFAULT_API_URL = 'https://api.rotalog.madebyhermes.com/api/v1';
+
+export const API_URL = (import.meta.env.VITE_API_URL ?? DEFAULT_API_URL).replace(/\/$/, '');
 
 let accessToken: string | null = null;
 

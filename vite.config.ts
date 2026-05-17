@@ -9,7 +9,7 @@ export default defineConfig({
     // ALTERACAO: proxy para desenvolvimento local com backend em /api/v1.
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        target: 'https://api.rotalog.madebyhermes.com',
         changeOrigin: true,
       },
     },
