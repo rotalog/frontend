@@ -130,7 +130,7 @@ export function OrderApprovalPanel({
           })}
         </ul>
 
-        {order.status === 'SOLICITADO' && (
+        {(order.status === 'SOLICITADO' || order.status === 'PENDENTE') && (
           <>
             <div className="space-y-2 mb-4">
               <label htmlFor="rejectionReason" className="block text-sm font-medium text-white dark:text-white light:text-gray-900">
@@ -208,7 +208,13 @@ export function OrderApprovalPanel({
           </button>
         )}
 
-        {(order.status === 'SOLICITADO' || order.status === 'ACEITO' || order.status === 'PAGAMENTO_CONFIRMADO' || order.status === 'EM_SEPARACAO') && (
+        {(
+          order.status === 'SOLICITADO' ||
+          order.status === 'PENDENTE' ||
+          order.status === 'ACEITO' ||
+          order.status === 'PAGAMENTO_CONFIRMADO' ||
+          order.status === 'EM_SEPARACAO'
+        ) && (
           <button
             type="button"
             onClick={onCancel}
@@ -230,7 +236,7 @@ export function OrderApprovalPanel({
           </button>
         )}
 
-        {order.status === 'RECUSADO' && rejectionReason && (
+        {(order.status === 'RECUSADO' || order.status === 'REJEITADO' || order.status === 'CANCELADO') && rejectionReason && (
           <p className="mt-3 text-sm text-red-400 light:text-red-700">
             Motivo informado: {rejectionReason}
           </p>

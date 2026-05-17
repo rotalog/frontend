@@ -10,9 +10,8 @@ export interface ApiInventoryItem {
 }
 
 export interface UpdateInventoryPayload {
-  quantity?: number;
-  reservedQuantity?: number;
-  reason?: string;
+  quantity: number;
+  reason: string;
   [key: string]: unknown;
 }
 

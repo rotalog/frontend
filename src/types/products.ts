@@ -12,19 +12,13 @@ export interface ApiProduct {
 }
 
 export interface CreateProductPayload {
-  supplierId?: string;
   name: string;
-  sku?: string;
-  description?: string;
-  price?: number;
+  minStockLevel: number;
   [key: string]: unknown;
 }
 
 export interface UpdateProductPayload {
-  name?: string;
-  sku?: string;
-  description?: string;
-  price?: number;
-  active?: boolean;
+  name: string;
+  minStockLevel: number;
   [key: string]: unknown;
 }

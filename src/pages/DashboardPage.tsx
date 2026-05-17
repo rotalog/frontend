@@ -116,7 +116,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   const [dashboardReport, setDashboardReport] = useState<DashboardReport | null>(null);
   const [apiOrders, setApiOrders] = useState<ApiOrder[]>([]);
   const [apiInventory, setApiInventory] = useState<ApiInventoryItem[]>([]);
-  const [todayRoute, setTodayRoute] = useState<ApiRoute | null>(null);
+  const [todayRoute, setTodayRoute] = useState<ApiRoute[]>([]);
   const [usingMockFallback, setUsingMockFallback] = useState(false);
 
   useEffect(() => {
@@ -171,7 +171,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         setTodayRoute(routeResult.value);
         hasSuccess = true;
       } else {
-        setTodayRoute(null);
+        setTodayRoute([]);
       }
 
       const hasPartialError = [reportResult, ordersResult, inventoryResult, routeResult]
@@ -284,11 +284,11 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   }, [dashboardReport, fallbackKpis]);
 
   const reportSummary = useMemo(() => {
-    const accepted = overviewOrders.filter(order => order.status !== 'RECUSADO').length;
-    const rejected = overviewOrders.filter(order => order.status === 'RECUSADO').length;
+    const accepted = overviewOrders.filter(order => !['RECUSADO', 'REJEITADO', 'CANCELADO'].includes(order.status)).length;
+    const rejected = overviewOrders.filter(order => ['RECUSADO', 'REJEITADO', 'CANCELADO'].includes(order.status)).length;
     const preparing = overviewOrders.filter(order => order.status === 'EM_SEPARACAO').length;
     const revenue = overviewOrders
-      .filter(order => order.status !== 'RECUSADO')
+      .filter(order => !['RECUSADO', 'REJEITADO', 'CANCELADO'].includes(order.status))
       .reduce((sum, order) => sum + order.valorTotal, 0);
 
     return { accepted, rejected, preparing, revenue };
@@ -321,7 +321,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   };
 
   const visibleFlowOrders = useMemo(() => {
-    return overviewOrders.filter(order => order.status !== 'SOLICITADO' && order.status !== 'RECUSADO');
+    return overviewOrders.filter(order => !['SOLICITADO', 'PENDENTE', 'RECUSADO', 'REJEITADO', 'CANCELADO'].includes(order.status));
   }, [overviewOrders]);
 
   const flowOrdersByColumn = useMemo(() => {
@@ -888,7 +888,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     activeOverviewTab === 'RELATORIOS'
   );
 
-  const hasApiData = apiOrders.length > 0 || apiInventory.length > 0 || Boolean(dashboardReport) || Boolean(todayRoute);
+  const hasApiData = apiOrders.length > 0 || apiInventory.length > 0 || Boolean(dashboardReport) || todayRoute.length > 0;
 
   return (
     <div className="flex w-full min-h-screen bg-[#050505] dark:bg-[#050505] light:bg-gray-50 transition-colors duration-300">

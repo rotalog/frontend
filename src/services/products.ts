@@ -12,16 +12,30 @@ export async function getSupplierProducts(supplierId: string) {
 }
 
 export async function createProduct(payload: CreateProductPayload) {
+  const minStockLevel = Number.isFinite(payload.minStockLevel)
+    ? Number(payload.minStockLevel)
+    : 0;
+
   return api<ApiProduct>('/products', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      name: payload.name,
+      minStockLevel,
+    }),
   });
 }
 
 export async function updateProduct(id: string, payload: UpdateProductPayload) {
+  const minStockLevel = Number.isFinite(payload.minStockLevel)
+    ? Number(payload.minStockLevel)
+    : 0;
+
   return api<ApiProduct>(`/products/${id}`, {
     method: 'PUT',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      name: payload.name,
+      minStockLevel,
+    }),
   });
 }
 

@@ -3,7 +3,6 @@ import type {
   ApiOrder,
   CreateOrderPayload,
   OrderTracking,
-  RejectOrderPayload,
 } from '../types/orders';
 
 export async function getOrders() {
@@ -32,10 +31,9 @@ export async function acceptOrder(id: string) {
 }
 
 export async function rejectOrder(id: string, reason?: string) {
-  const payload: RejectOrderPayload = { reason };
+  void reason;
   return api<ApiOrder>(`/orders/${id}/reject`, {
     method: 'PUT',
-    body: JSON.stringify(payload),
   });
 }
 

@@ -48,6 +48,12 @@ interface AuthResponse {
   [key: string]: unknown;
 }
 
+interface SupplierLookupResponse {
+  name?: string;
+  companyName?: string;
+  [key: string]: unknown;
+}
+
 type MeResponse = AuthenticatedUser | { user: AuthenticatedUser };
 
 function normalizeAuthUser(payload: MeResponse): AuthenticatedUser {
@@ -80,6 +86,31 @@ function extractCompanyName(user: AuthenticatedUser, fallback = 'Fornecedor') {
   }
 
   return fallback;
+}
+
+async function resolveCompanyName(user: AuthenticatedUser, fallback = 'Fornecedor') {
+  const directCompanyName = extractCompanyName(user, '').trim();
+  if (directCompanyName) {
+    return directCompanyName;
+  }
+
+  const supplierId = ensureString(user.supplierId).trim();
+  if (supplierId) {
+    try {
+      const supplier = await api<SupplierLookupResponse>(`/suppliers/${supplierId}`, {
+        method: 'GET',
+      });
+
+      const supplierName = ensureString(supplier.name, ensureString(supplier.companyName)).trim();
+      if (supplierName) {
+        return supplierName;
+      }
+    } catch {
+      // Keep local fallback behavior if supplier lookup fails.
+    }
+  }
+
+  return extractCompanyName(user, fallback);
 }
 
 function normalizeUserShape(user: AuthenticatedUser): AuthenticatedUser {
@@ -147,17 +178,19 @@ export async function loginSupplier(payload: LoginPayload): Promise<AuthResult> 
 
     const userFromResponse = resolveAuthUser(loginResponse);
     if (userFromResponse) {
+      const companyName = await resolveCompanyName(userFromResponse);
       return {
         token: token ?? undefined,
-        companyName: extractCompanyName(userFromResponse),
+        companyName,
         user: userFromResponse,
       };
     }
 
     const user = await getCurrentUser();
+    const companyName = await resolveCompanyName(user);
     return {
       token: token ?? undefined,
-      companyName: extractCompanyName(user),
+      companyName,
       user,
     };
   } catch (error) {
@@ -199,18 +232,20 @@ export async function registerSupplier(payload: SupplierRegisterPayload): Promis
 
   const userFromResponse = resolveAuthUser(registerResponse);
   if (userFromResponse) {
+    const companyName = await resolveCompanyName(userFromResponse, payload.empresaNome);
     return {
       token: token ?? undefined,
-      companyName: extractCompanyName(userFromResponse, payload.empresaNome),
+      companyName,
       user: userFromResponse,
     };
   }
 
   try {
     const user = await getCurrentUser();
+    const companyName = await resolveCompanyName(user, payload.empresaNome);
     return {
       token: token ?? undefined,
-      companyName: extractCompanyName(user, payload.empresaNome),
+      companyName,
       user,
     };
   } catch {

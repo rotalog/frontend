@@ -100,15 +100,18 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
   const buildInventoryUpdatePayload = (
     item: StockItem,
-    changes?: Partial<{ total: number; reservado: number }>,
+    changes?: Partial<{ total: number }>,
   ) => {
     const total = changes?.total ?? item.total;
-    const reservado = changes?.reservado ?? item.reservado;
+    const quantityToAdd = total - item.total;
+
+    if (quantityToAdd <= 0) {
+      return null;
+    }
 
     return {
-      quantity: total,
-      reservedQuantity: reservado,
-      reason: 'Ajuste manual no painel web',
+      quantity: quantityToAdd,
+      reason: 'Entrada manual no painel web',
     };
   };
 
@@ -280,10 +283,13 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     await runWithFallback(
       `save-row:${productId}`,
       async () => {
-        await updateInventory(productId, buildInventoryUpdatePayload(stockItem, {
+        const inventoryPayload = buildInventoryUpdatePayload(stockItem, {
           total: newTotal,
-          reservado: newReserved,
-        }));
+        });
+
+        if (inventoryPayload) {
+          await updateInventory(productId, inventoryPayload);
+        }
 
         applyStockUpdateLocally(
           productId,
@@ -593,9 +599,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       async () => {
         await createProduct({
           name: produto,
-          sku: codigo,
-          price: 0,
-          description: fotoUrl ? 'Produto com foto cadastrada no painel' : undefined,
+          minStockLevel: 0,
         });
 
         localInsert();
@@ -717,14 +721,16 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       async () => {
         await updateProduct(productId, {
           name: produto,
-          sku: codigo,
-          active: true,
+          minStockLevel: 0,
         });
 
-        await updateInventory(productId, buildInventoryUpdatePayload(previous, {
+        const inventoryPayload = buildInventoryUpdatePayload(previous, {
           total,
-          reservado,
-        }));
+        });
+
+        if (inventoryPayload) {
+          await updateInventory(productId, inventoryPayload);
+        }
 
         localUpdate();
       },

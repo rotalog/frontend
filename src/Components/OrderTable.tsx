@@ -6,8 +6,11 @@ import { acceptOrder, cancelOrder, dispatchOrder, getOrderTracking, prepareOrder
 import { mockOrders, orderStatusOptions } from '../data/mockData';
 
 const statusStyle: Record<OrderStatus, string> = {
+  PENDENTE: 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 light:bg-emerald-100 light:text-emerald-700 light:border-emerald-300',
   SOLICITADO: 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 light:bg-emerald-100 light:text-emerald-700 light:border-emerald-300',
   ACEITO: 'bg-sky-500/15 text-sky-400 border border-sky-500/30 light:bg-sky-100 light:text-sky-700 light:border-sky-300',
+  REJEITADO: 'bg-rose-500/15 text-rose-400 border border-rose-500/30 light:bg-rose-100 light:text-rose-700 light:border-rose-300',
+  CANCELADO: 'bg-rose-500/15 text-rose-400 border border-rose-500/30 light:bg-rose-100 light:text-rose-700 light:border-rose-300',
   PAGAMENTO_CONFIRMADO: 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30 light:bg-cyan-100 light:text-cyan-700 light:border-cyan-300',
   EM_SEPARACAO: 'bg-amber-500/15 text-amber-400 border border-amber-500/30 light:bg-amber-100 light:text-amber-700 light:border-amber-300',
   SAIU_PARA_ENTREGA: 'bg-violet-500/15 text-violet-400 border border-violet-500/30 light:bg-violet-100 light:text-violet-700 light:border-violet-300',
@@ -16,8 +19,11 @@ const statusStyle: Record<OrderStatus, string> = {
 };
 
 const statusLabel: Record<OrderStatus, string> = {
+  PENDENTE: 'Pendente',
   SOLICITADO: 'Novo',
   ACEITO: 'Reservado',
+  REJEITADO: 'Rejeitado',
+  CANCELADO: 'Cancelado',
   PAGAMENTO_CONFIRMADO: 'Pagamento confirmado',
   EM_SEPARACAO: 'Em separacao',
   SAIU_PARA_ENTREGA: 'Saiu para entrega',
@@ -55,14 +61,18 @@ type ApiOrderLike = {
 };
 
 const apiToLegacyStatus: Record<string, OrderStatus> = {
-  PENDING: 'SOLICITADO',
-  SOLICITADO: 'SOLICITADO',
+  PENDING: 'PENDENTE',
+  SOLICITADO: 'PENDENTE',
+  PENDENTE: 'PENDENTE',
+  RESERVED: 'ACEITO',
   ACCEPTED: 'ACEITO',
   ACEITO: 'ACEITO',
-  REJECTED: 'RECUSADO',
-  RECUSADO: 'RECUSADO',
-  CANCELED: 'RECUSADO',
-  CANCELADO: 'RECUSADO',
+  REJECTED: 'REJEITADO',
+  REJEITADO: 'REJEITADO',
+  RECUSADO: 'REJEITADO',
+  CANCELLED: 'CANCELADO',
+  CANCELED: 'CANCELADO',
+  CANCELADO: 'CANCELADO',
   PREPARING: 'EM_SEPARACAO',
   EM_SEPARACAO: 'EM_SEPARACAO',
   DISPATCHED: 'SAIU_PARA_ENTREGA',
@@ -77,10 +87,14 @@ const fallbackOrder: Order = {
   id: '',
   cliente: '',
   valorTotal: 0,
-  status: 'SOLICITADO',
+  status: 'PENDENTE',
   dataDesejada: new Date().toISOString(),
   itens: [],
 };
+
+function isRejectedStatus(status: OrderStatus) {
+  return status === 'REJEITADO' || status === 'CANCELADO' || status === 'RECUSADO';
+}
 
 export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock, onRegisterStockMovements }: OrderTableProps) {
   const [statusFilter, setStatusFilter] = useState<'ALL' | OrderStatus>('ALL');
@@ -160,7 +174,7 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       setOrders(current => [realtimeOrder, ...current]);
       setTimelineByOrder(current => ({
         ...current,
-        [realtimeOrder.id]: [createTimelineEvent('SOLICITADO', 'Pedido recebido em tempo real.')],
+        [realtimeOrder.id]: [createTimelineEvent('PENDENTE', 'Pedido recebido em tempo real.')],
       }));
       setNotification({
         id: realtimeOrder.id,
@@ -203,10 +217,10 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       (order.status === 'SAIU_PARA_ENTREGA' || order.status === 'ENTREGUE'),
     );
 
-    const accepted = orders.filter(order => order.status !== 'RECUSADO').length;
-    const rejected = orders.filter(order => order.status === 'RECUSADO').length;
+    const accepted = orders.filter(order => !isRejectedStatus(order.status)).length;
+    const rejected = orders.filter(order => isRejectedStatus(order.status)).length;
     const totalRevenue = orders
-      .filter(order => order.status !== 'RECUSADO')
+      .filter(order => !isRejectedStatus(order.status))
       .reduce((sum, order) => sum + order.valorTotal, 0);
 
     return {
@@ -393,16 +407,16 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
 
     try {
       const response = await rejectOrder(selectedOrder.id, reason);
-      const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'RECUSADO');
+      const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'REJEITADO');
       setRejectionReasons(current => ({ ...current, [selectedOrder.id]: reason }));
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, `Pedido recusado via API. Motivo: ${reason}`));
       setActionFeedback('Pedido recusado com sincronizacao da API.');
       setUsingLocalOrderFallback(false);
       setApiActionUnavailable(false);
     } catch {
-      applyOrderStatusLocally(selectedOrder.id, 'RECUSADO');
+      applyOrderStatusLocally(selectedOrder.id, 'REJEITADO');
       setRejectionReasons(current => ({ ...current, [selectedOrder.id]: reason }));
-      appendTimeline(selectedOrder.id, createTimelineEvent('RECUSADO', `Pedido recusado. Motivo: ${reason}`));
+      appendTimeline(selectedOrder.id, createTimelineEvent('REJEITADO', `Pedido recusado. Motivo: ${reason}`));
       setActionFeedback('API indisponivel. A acao foi simulada localmente.');
       setOrderActionError('API indisponivel. A acao foi simulada localmente.');
       setUsingLocalOrderFallback(true);
@@ -483,14 +497,14 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
 
     try {
       const response = await cancelOrder(selectedOrder.id);
-      const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'RECUSADO');
+      const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'CANCELADO');
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, 'Pedido cancelado via API.'));
       setActionFeedback('Pedido cancelado com sincronizacao da API.');
       setUsingLocalOrderFallback(false);
       setApiActionUnavailable(false);
     } catch {
-      applyOrderStatusLocally(selectedOrder.id, 'RECUSADO');
-      appendTimeline(selectedOrder.id, createTimelineEvent('RECUSADO', 'Pedido cancelado no modo local.'));
+      applyOrderStatusLocally(selectedOrder.id, 'CANCELADO');
+      appendTimeline(selectedOrder.id, createTimelineEvent('CANCELADO', 'Pedido cancelado no modo local.'));
       setActionFeedback('API indisponivel. A acao foi simulada localmente.');
       setOrderActionError('API indisponivel. A acao foi simulada localmente.');
       setUsingLocalOrderFallback(true);

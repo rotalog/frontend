@@ -24,7 +24,10 @@ export interface UpdateSupplierPayload {
 }
 
 export interface NearbySuppliersParams {
-  lat: number;
-  lng: number;
-  radius: number;
+  latitude?: number;
+  longitude?: number;
+  radiusMeters?: number;
+  lat?: number;
+  lng?: number;
+  radius?: number;
 }

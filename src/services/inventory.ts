@@ -12,9 +12,16 @@ export async function getInventory() {
 }
 
 export async function updateInventory(productId: string, payload: UpdateInventoryPayload) {
+  if (!Number.isFinite(payload.quantity) || payload.quantity <= 0) {
+    throw new Error('A quantidade de entrada deve ser maior que zero.');
+  }
+
   return api<ApiInventoryItem>(`/inventory/${productId}`, {
     method: 'PUT',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      quantity: payload.quantity,
+      reason: payload.reason,
+    }),
   });
 }
 
@@ -25,11 +32,13 @@ export async function getInventoryMovements() {
 }
 
 export async function importInventoryCsv(file: File) {
-  const formData = new FormData();
-  formData.append('file', file);
+  const csvContent = await file.text();
 
   return api<{ imported?: number; [key: string]: unknown }>('/inventory/import', {
     method: 'POST',
-    body: formData,
+    headers: {
+      'Content-Type': 'text/csv',
+    },
+    body: csvContent,
   });
 }

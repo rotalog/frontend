@@ -1,7 +1,10 @@
 // src/types/orders.ts
 export type OrderStatus =
+  | 'PENDENTE'
   | 'SOLICITADO'
   | 'ACEITO'
+  | 'REJEITADO'
+  | 'CANCELADO'
   | 'PAGAMENTO_CONFIRMADO'
   | 'EM_SEPARACAO'
   | 'SAIU_PARA_ENTREGA'
@@ -44,8 +47,9 @@ export interface StockMovement {
 
 export type ApiOrderStatus =
   | 'PENDING'
-  | 'ACCEPTED'
+  | 'RESERVED'
   | 'REJECTED'
+  | 'CANCELLED'
   | 'CANCELED'
   | 'PREPARING'
   | 'DISPATCHED'

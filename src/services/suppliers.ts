@@ -24,11 +24,14 @@ export async function updateSupplier(id: string, payload: UpdateSupplierPayload)
   });
 }
 
-export async function getNearbySuppliers({ lat, lng, radius }: NearbySuppliersParams) {
+export async function getNearbySuppliers({ latitude, longitude, radiusMeters, lat, lng, radius }: NearbySuppliersParams) {
+  const normalizedLatitude = latitude ?? lat ?? 0;
+  const normalizedLongitude = longitude ?? lng ?? 0;
+  const normalizedRadiusMeters = radiusMeters ?? radius ?? 0;
   const params = new URLSearchParams({
-    lat: String(lat),
-    lng: String(lng),
-    radius: String(radius),
+    latitude: String(normalizedLatitude),
+    longitude: String(normalizedLongitude),
+    radiusMeters: String(normalizedRadiusMeters),
   });
 
   return api<ApiSupplier[]>(`/suppliers/nearby?${params.toString()}`, {

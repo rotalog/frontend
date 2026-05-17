@@ -9,7 +9,7 @@ export async function generateRoute(payload: GenerateRoutePayload) {
 }
 
 export async function getTodayRoute() {
-  return api<ApiRoute | null>('/routes/today', {
+  return api<ApiRoute[]>('/routes/today', {
     method: 'GET',
   });
 }

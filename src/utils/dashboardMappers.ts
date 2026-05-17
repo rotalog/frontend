@@ -5,12 +5,18 @@ import type { Order, OrderStatus, StockItem } from '../types/orders';
 type GenericSource = Record<string, unknown> | null | undefined;
 
 const ORDER_STATUS_MAP: Record<string, OrderStatus> = {
-  SOLICITADO: 'SOLICITADO',
-  PENDING: 'SOLICITADO',
-  NOVO: 'SOLICITADO',
-  NEW: 'SOLICITADO',
+  SOLICITADO: 'PENDENTE',
+  PENDING: 'PENDENTE',
+  PENDENTE: 'PENDENTE',
+  NOVO: 'PENDENTE',
+  NEW: 'PENDENTE',
   ACEITO: 'ACEITO',
+  RESERVED: 'ACEITO',
   ACCEPTED: 'ACEITO',
+  REJEITADO: 'REJEITADO',
+  REJECTED: 'REJEITADO',
+  CANCELLED: 'CANCELADO',
+  CANCELADO: 'CANCELADO',
   PAGAMENTO_CONFIRMADO: 'PAGAMENTO_CONFIRMADO',
   PAYMENT_CONFIRMED: 'PAGAMENTO_CONFIRMADO',
   EM_SEPARACAO: 'EM_SEPARACAO',
@@ -20,9 +26,9 @@ const ORDER_STATUS_MAP: Record<string, OrderStatus> = {
   ENTREGUE: 'ENTREGUE',
   DELIVERED: 'ENTREGUE',
   RECUSADO: 'RECUSADO',
-  REJECTED: 'RECUSADO',
+  REJECTED_LEGACY: 'RECUSADO',
   CANCELED: 'RECUSADO',
-  CANCELADO: 'RECUSADO',
+  CANCELLED_LEGACY: 'RECUSADO',
 };
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -66,8 +72,16 @@ export function getNumberValue(source: GenericSource, possibleKeys: string[], fa
 }
 
 function normalizeOrderStatus(rawStatus: unknown): OrderStatus {
-  const normalized = toString(rawStatus, 'SOLICITADO').toUpperCase();
-  return ORDER_STATUS_MAP[normalized] ?? 'SOLICITADO';
+  const normalized = toString(rawStatus, 'PENDING').toUpperCase();
+  return ORDER_STATUS_MAP[normalized] ?? 'PENDENTE';
+}
+
+function isRejectedStatus(status: OrderStatus) {
+  return status === 'REJEITADO' || status === 'CANCELADO' || status === 'RECUSADO';
+}
+
+function isPendingStatus(status: OrderStatus) {
+  return status === 'PENDENTE' || status === 'SOLICITADO';
 }
 
 function mapApiOrderItem(item: unknown) {
@@ -126,10 +140,10 @@ export function mapApiInventoryToLegacyStock(apiInventory: ApiInventoryItem): St
 }
 
 export function calculateFallbackKpis(orders: Order[], inventory: StockItem[]) {
-  const validOrders = orders.filter(order => order.status !== 'RECUSADO');
-  const acceptedOrders = orders.filter(order => order.status !== 'SOLICITADO' && order.status !== 'RECUSADO');
-  const rejectedOrders = orders.filter(order => order.status === 'RECUSADO').length;
-  const pendingOrders = orders.filter(order => order.status === 'SOLICITADO').length;
+  const validOrders = orders.filter(order => !isRejectedStatus(order.status));
+  const acceptedOrders = orders.filter(order => !isPendingStatus(order.status) && !isRejectedStatus(order.status));
+  const rejectedOrders = orders.filter(order => isRejectedStatus(order.status)).length;
+  const pendingOrders = orders.filter(order => isPendingStatus(order.status)).length;
   const preparingOrders = orders.filter(order => order.status === 'EM_SEPARACAO').length;
   const deliveriesInProgress = orders.filter(order => order.status === 'SAIU_PARA_ENTREGA').length;
   const completedDeliveries = orders.filter(order => order.status === 'ENTREGUE').length;
