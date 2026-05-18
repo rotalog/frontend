@@ -215,12 +215,12 @@ export const mockOrders: Order[] = [
 ];
 
 export const mockStock: StockItem[] = [
-  { codigo: 'ARR001', produto: 'Arroz 5kg', total: 180, reservado: 0 },
-  { codigo: 'FEJ001', produto: 'Feijao 1kg', total: 250, reservado: 0 },
-  { codigo: 'ACU001', produto: 'Acucar 1kg', total: 250, reservado: 30 },
-  { codigo: 'CAF001', produto: 'Cafe 500g', total: 150, reservado: 10 },
-  { codigo: 'OLE001', produto: 'Oleo 900ml', total: 300, reservado: 0 },
-  { codigo: 'MAC001', produto: 'Macarrao 500g', total: 450, reservado: 0 },
-  { codigo: 'FAR001', produto: 'Farinha 1kg', total: 215, reservado: 25 },
-  { codigo: 'MOL001', produto: 'Molho de Tomate 340g', total: 260, reservado: 0 },
+  { productId: 'mock-arr001', codigo: 'ARR001', produto: 'Arroz 5kg', total: 180, reservado: 0 },
+  { productId: 'mock-fej001', codigo: 'FEJ001', produto: 'Feijao 1kg', total: 250, reservado: 0 },
+  { productId: 'mock-acu001', codigo: 'ACU001', produto: 'Acucar 1kg', total: 250, reservado: 30 },
+  { productId: 'mock-caf001', codigo: 'CAF001', produto: 'Cafe 500g', total: 150, reservado: 10 },
+  { productId: 'mock-ole001', codigo: 'OLE001', produto: 'Oleo 900ml', total: 300, reservado: 0 },
+  { productId: 'mock-mac001', codigo: 'MAC001', produto: 'Macarrao 500g', total: 450, reservado: 0 },
+  { productId: 'mock-far001', codigo: 'FAR001', produto: 'Farinha 1kg', total: 215, reservado: 25 },
+  { productId: 'mock-mol001', codigo: 'MOL001', produto: 'Molho de Tomate 340g', total: 260, reservado: 0 },
 ];

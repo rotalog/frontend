@@ -5,7 +5,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
 import type { AuthResult, AuthenticatedUser } from './services/auth';
-import { getCompanyNameFromUser, getCurrentUser, logoutSupplier } from './services/auth';
+import { getCompanyNameFromUser, getCurrentUser, isSupplierSession, logoutSupplier } from './services/auth';
 
 function App() {
   const { theme, toggleTheme } = useTheme();
@@ -47,6 +47,12 @@ function App() {
   }, []);
 
   const handleLogin = (result: AuthResult) => {
+    if (!isSupplierSession(result.user)) {
+      setCurrentUser(null);
+      setCompanyName('');
+      return;
+    }
+
     setCurrentUser(result.user);
     setCompanyName(result.companyName);
   };
@@ -72,7 +78,7 @@ function App() {
     setCompanyName('');
   };
 
-  const isAuthenticated = currentUser !== null;
+  const isAuthenticated = isSupplierSession(currentUser);
 
   if (isLoadingAuth) {
     return (
@@ -106,7 +112,7 @@ function App() {
           path="/dashboard"
           element={
             isAuthenticated
-              ? <DashboardPage theme={theme} toggleTheme={toggleTheme} onLogout={handleLogout} companyName={companyName} />
+              ? <DashboardPage theme={theme} toggleTheme={toggleTheme} onLogout={handleLogout} companyName={companyName} supplierId={currentUser?.supplierId} />
               : <Navigate to="/login" replace />
           }
         />

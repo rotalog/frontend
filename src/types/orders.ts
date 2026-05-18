@@ -21,6 +21,7 @@ export interface Order {
 }
 
 export interface StockItem {
+  productId: string;
   codigo: string;
   produto: string;
   total: number;

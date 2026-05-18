@@ -1,13 +1,16 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Sidebar, type DashboardSection } from '../Components/Sidebar';
 import { OrderTable } from '../Components/OrderTable';
 import { StockManagementSection } from '../Components/StockManagementSection';
 import { mockOrders, mockStock } from '../data/mockData';
 import { getInventory } from '../services/inventory';
-import { getOrders } from '../services/orders';
+import { ApiError } from '../services/api';
+import { dispatchOrder as dispatchOrderRequest, getOrders, prepareOrder as prepareOrderRequest } from '../services/orders';
 import { getDashboardReport } from '../services/reports';
 import { getTodayRoute } from '../services/routes';
+import { getSupplierProducts } from '../services/products';
 import type { ApiInventoryItem } from '../types/inventory';
+import type { ApiProduct } from '../types/products';
 import type { ApiRoute } from '../types/routes';
 import type { Order, OrderStatus, StockMovement } from '../types/orders';
 import type { ApiOrder } from '../types/orders';
@@ -17,6 +20,7 @@ import {
   getNumberValue,
   mapApiInventoryToLegacyStock,
   mapApiOrderToLegacyOrder,
+  mergeSupplierProductsWithInventory,
 } from '../utils/dashboardMappers';
 
 interface DashboardPageProps {
@@ -24,6 +28,7 @@ interface DashboardPageProps {
   toggleTheme: () => void;
   onLogout: () => void;
   companyName: string;
+  supplierId?: string;
 }
 
 type OverviewTab = 'VISAO_GERAL' | 'PEDIDOS' | 'ESTOQUE' | 'ENTREGAS' | 'RELATORIOS';
@@ -36,6 +41,8 @@ const topNavItems: Array<{ tab: OverviewTab; label: string }> = [
   { tab: 'RELATORIOS', label: 'Relatórios' },
 ];
 
+type DashboardOrderAction = 'prepare' | 'dispatch';
+
 type OrderFlowColumn = {
   id: 'PAGO' | 'EM_SEPARACAO' | 'DESPACHADO' | 'ENTREGUE';
   title: string;
@@ -43,7 +50,7 @@ type OrderFlowColumn = {
   statuses: OrderStatus[];
   action?: {
     label: string;
-    nextStatus: OrderStatus;
+    kind: DashboardOrderAction;
     className: string;
   };
 };
@@ -62,7 +69,7 @@ const orderFlowColumns: OrderFlowColumn[] = [
     statuses: ['PAGAMENTO_CONFIRMADO', 'ACEITO'],
     action: {
       label: 'Iniciar preparo',
-      nextStatus: 'EM_SEPARACAO',
+      kind: 'prepare',
       className: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 light:bg-emerald-100 light:text-emerald-700',
     },
   },
@@ -73,7 +80,7 @@ const orderFlowColumns: OrderFlowColumn[] = [
     statuses: ['EM_SEPARACAO'],
     action: {
       label: 'Despachar',
-      nextStatus: 'SAIU_PARA_ENTREGA',
+      kind: 'dispatch',
       className: 'border-sky-500/40 bg-sky-500/15 text-sky-300 hover:bg-sky-500/25 light:bg-sky-100 light:text-sky-700',
     },
   },
@@ -82,11 +89,6 @@ const orderFlowColumns: OrderFlowColumn[] = [
     title: 'Despachado',
     icon: '🚚',
     statuses: ['SAIU_PARA_ENTREGA'],
-    action: {
-      label: 'Marcar entregue',
-      nextStatus: 'ENTREGUE',
-      className: 'border-violet-500/40 bg-violet-500/15 text-violet-300 hover:bg-violet-500/25 light:bg-violet-100 light:text-violet-700',
-    },
   },
   {
     id: 'ENTREGUE',
@@ -104,7 +106,7 @@ const flowTimeByStatus: Partial<Record<OrderStatus, string>> = {
   ENTREGUE: 'Entregue 07:55',
 };
 
-export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: DashboardPageProps) {
+export function DashboardPage({ theme, toggleTheme, onLogout, companyName, supplierId }: DashboardPageProps) {
   const [activeSection, setActiveSection] = useState<DashboardSection>('VISAO_GERAL');
   const [activeOverviewTab, setActiveOverviewTab] = useState<OverviewTab>('VISAO_GERAL');
   const [overviewOrders, setOverviewOrders] = useState<Order[]>(mockOrders);
@@ -118,85 +120,114 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   const [apiInventory, setApiInventory] = useState<ApiInventoryItem[]>([]);
   const [todayRoute, setTodayRoute] = useState<ApiRoute[]>([]);
   const [usingMockFallback, setUsingMockFallback] = useState(false);
+  const [isSyncingOverviewOrder, setIsSyncingOverviewOrder] = useState('');
+  const [overviewActionError, setOverviewActionError] = useState('');
+
+  const loadDashboardData = useCallback(async () => {
+    setIsLoadingDashboard(true);
+    setDashboardError('');
+
+    const requests = [
+      getDashboardReport(),
+      getOrders(),
+      getInventory(),
+      getTodayRoute(),
+      supplierId ? getSupplierProducts(supplierId) : Promise.resolve([] as ApiProduct[]),
+    ] as const;
+
+    const [reportResult, ordersResult, inventoryResult, routeResult, productsResult] = await Promise.allSettled(requests);
+
+    const authFailure = [reportResult, ordersResult, inventoryResult, routeResult, productsResult]
+      .find(result => result.status === 'rejected' && result.reason instanceof ApiError && (result.reason.status === 401 || result.reason.status === 403));
+
+    if (authFailure?.status === 'rejected') {
+      setDashboardReport(null);
+      setApiOrders([]);
+      setOverviewOrders([]);
+      setApiInventory([]);
+      setStock([]);
+      setTodayRoute([]);
+      setUsingMockFallback(false);
+      setDashboardError(authFailure.reason.status === 401
+        ? 'Sua sessao expirou. Faca login novamente.'
+        : 'Sua conta autenticada nao possui acesso de fornecedor para este painel.');
+      setIsLoadingDashboard(false);
+      return;
+    }
+
+    let hasSuccess = false;
+    let hasMockFallback = false;
+
+    if (reportResult.status === 'fulfilled') {
+      setDashboardReport(reportResult.value);
+      hasSuccess = true;
+    } else {
+      setDashboardReport(null);
+    }
+
+    if (ordersResult.status === 'fulfilled') {
+      setApiOrders(ordersResult.value);
+      setOverviewOrders(ordersResult.value.map(mapApiOrderToLegacyOrder));
+      hasSuccess = true;
+    } else {
+      setApiOrders([]);
+      setOverviewOrders(mockOrders);
+      hasMockFallback = true;
+    }
+
+    if (productsResult.status === 'fulfilled') {
+      hasSuccess = true;
+    } else {
+      hasMockFallback = true;
+    }
+
+    if (inventoryResult.status === 'fulfilled') {
+      setApiInventory(inventoryResult.value);
+      hasSuccess = true;
+    } else {
+      setApiInventory([]);
+      hasMockFallback = true;
+    }
+
+    if (productsResult.status === 'fulfilled' && inventoryResult.status === 'fulfilled') {
+      setStock(mergeSupplierProductsWithInventory(productsResult.value, inventoryResult.value));
+    } else if (inventoryResult.status === 'fulfilled') {
+      setStock(inventoryResult.value.map(mapApiInventoryToLegacyStock));
+    } else {
+      setStock(mockStock);
+    }
+
+    if (routeResult.status === 'fulfilled') {
+      setTodayRoute(routeResult.value);
+      hasSuccess = true;
+    } else {
+      setTodayRoute([]);
+    }
+
+    const hasPartialError = [reportResult, ordersResult, inventoryResult, routeResult, productsResult]
+      .some(result => result.status === 'rejected');
+
+    if (!hasSuccess) {
+      hasMockFallback = true;
+      setOverviewOrders(mockOrders);
+      setStock(mockStock);
+    }
+
+    if (!hasSuccess || hasPartialError) {
+      setDashboardError('Nao foi possivel carregar todos os dados da API. Alguns dados demonstrativos estao sendo exibidos.');
+    }
+
+    setUsingMockFallback(hasMockFallback);
+    setIsLoadingDashboard(false);
+  }, [supplierId]);
 
   useEffect(() => {
-    let active = true;
+    const timeoutId = window.setTimeout(() => {
+      void loadDashboardData();
+    }, 0);
 
-    const loadDashboardData = async () => {
-      setIsLoadingDashboard(true);
-      setDashboardError('');
-
-      const [reportResult, ordersResult, inventoryResult, routeResult] = await Promise.allSettled([
-        getDashboardReport(),
-        getOrders(),
-        getInventory(),
-        getTodayRoute(),
-      ]);
-
-      if (!active) {
-        return;
-      }
-
-      let hasSuccess = false;
-      let hasMockFallback = false;
-
-      if (reportResult.status === 'fulfilled') {
-        setDashboardReport(reportResult.value);
-        hasSuccess = true;
-      } else {
-        setDashboardReport(null);
-      }
-
-      if (ordersResult.status === 'fulfilled') {
-        setApiOrders(ordersResult.value);
-        setOverviewOrders(ordersResult.value.map(mapApiOrderToLegacyOrder));
-        hasSuccess = true;
-      } else {
-        setApiOrders([]);
-        setOverviewOrders(mockOrders);
-        hasMockFallback = true;
-      }
-
-      if (inventoryResult.status === 'fulfilled') {
-        setApiInventory(inventoryResult.value);
-        setStock(inventoryResult.value.map(mapApiInventoryToLegacyStock));
-        hasSuccess = true;
-      } else {
-        setApiInventory([]);
-        setStock(mockStock);
-        hasMockFallback = true;
-      }
-
-      if (routeResult.status === 'fulfilled') {
-        setTodayRoute(routeResult.value);
-        hasSuccess = true;
-      } else {
-        setTodayRoute([]);
-      }
-
-      const hasPartialError = [reportResult, ordersResult, inventoryResult, routeResult]
-        .some(result => result.status === 'rejected');
-
-      if (!hasSuccess) {
-        hasMockFallback = true;
-        setOverviewOrders(mockOrders);
-        setStock(mockStock);
-      }
-
-      if (!hasSuccess || hasPartialError) {
-        setDashboardError('Nao foi possivel carregar todos os dados da API. Alguns dados demonstrativos estao sendo exibidos.');
-      }
-
-      setUsingMockFallback(hasMockFallback);
-      setIsLoadingDashboard(false);
-    };
-
-    void loadDashboardData();
-
-    return () => {
-      active = false;
-    };
-  }, []);
+    return () => window.clearTimeout(timeoutId);
+  }, [loadDashboardData]);
 
   useEffect(() => {
     if (!usingMockFallback) {
@@ -357,32 +388,33 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     }));
   }, [preparingOrders, stock]);
 
-  const updateOverviewOrderStatus = (orderId: string, nextStatus: OrderStatus) => {
-    setOverviewOrders(current => current.map(order => (
-      order.id === orderId ? { ...order, status: nextStatus } : order
-    )));
-  };
+  const runOverviewOrderAction = async (order: Order, action: DashboardOrderAction) => {
+    if (isSyncingOverviewOrder) {
+      return;
+    }
 
-  const confirmDispatchOrder = (order: Order) => {
-    setOverviewOrders(current => current.map(currentOrder => (
-      currentOrder.id === order.id ? { ...currentOrder, status: 'SAIU_PARA_ENTREGA' } : currentOrder
-    )));
+    setIsSyncingOverviewOrder(order.id);
+    setOverviewActionError('');
 
-    setStock(current => current.map(stockItem => {
-      const orderItem = order.itens.find(item => item.nome === stockItem.produto);
-
-      if (!orderItem) {
-        return stockItem;
+    try {
+      if (action === 'prepare') {
+        await prepareOrderRequest(order.id);
+        setStockNotice(`Pedido ${order.id} enviado para separacao.`);
       }
 
-      return {
-        ...stockItem,
-        total: Math.max(0, stockItem.total - orderItem.quantidade),
-        reservado: Math.max(0, stockItem.reservado - orderItem.quantidade),
-      };
-    }));
+      if (action === 'dispatch') {
+        await dispatchOrderRequest(order.id);
+        setStockNotice(`Pedido ${order.id} confirmado para despacho.`);
+      }
 
-    setStockNotice(`Pedido ${order.id} confirmado para despacho`);
+      await loadDashboardData();
+    } catch (error) {
+      setOverviewActionError(error instanceof Error && error.message.trim()
+        ? error.message
+        : 'Nao foi possivel atualizar o pedido na API.');
+    } finally {
+      setIsSyncingOverviewOrder('');
+    }
   };
 
   const getOrderDistance = (order: Order) => {
@@ -440,6 +472,10 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
             </span>
           </div>
 
+          {overviewActionError && (
+            <p className="mt-4 text-xs text-amber-300 light:text-amber-700">{overviewActionError}</p>
+          )}
+
           <div className="mt-4 grid grid-cols-1 lg:grid-cols-4 gap-4">
             {orderFlowColumns.map(column => {
               const columnOrders = flowOrdersByColumn[column.id];
@@ -470,8 +506,11 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
                         {action && (
                           <button
                             type="button"
-                            onClick={() => updateOverviewOrderStatus(order.id, action.nextStatus)}
-                            className={`mt-3 w-full rounded-md border px-3 py-2 text-xs font-bold transition-colors ${action.className}`}
+                            onClick={() => {
+                              void runOverviewOrderAction(order, action.kind)
+                            }}
+                            disabled={isSyncingOverviewOrder === order.id}
+                            className={`mt-3 w-full rounded-md border px-3 py-2 text-xs font-bold transition-colors disabled:opacity-60 ${action.className}`}
                           >
                             {action.label} →
                           </button>
@@ -611,8 +650,11 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
                   <div className="mt-4 flex flex-col sm:flex-row gap-3">
                     <button
                       type="button"
-                      onClick={() => confirmDispatchOrder(dispatchOrder)}
-                      className="flex-1 rounded-md bg-[#00ff66] px-4 py-3 text-sm font-bold text-black transition-colors hover:bg-[#22ff7a]"
+                      onClick={() => {
+                        void runOverviewOrderAction(dispatchOrder, 'dispatch')
+                      }}
+                      disabled={isSyncingOverviewOrder === dispatchOrder.id}
+                      className="flex-1 rounded-md bg-[#00ff66] px-4 py-3 text-sm font-bold text-black transition-colors hover:bg-[#22ff7a] disabled:opacity-60"
                     >
                       Confirmar despacho
                     </button>
@@ -808,8 +850,6 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
           orders={overviewOrders}
           onOrdersChange={setOverviewOrders}
           stock={stock}
-          setStock={setStock}
-          onRegisterStockMovements={registerStockMovements}
         />
       );
     }
@@ -821,6 +861,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
           setStock={setStock}
           movements={stockMovements}
           onRegisterMovements={registerStockMovements}
+          onRefreshStock={loadDashboardData}
         />
       );
     }

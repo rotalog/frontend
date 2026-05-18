@@ -18,7 +18,7 @@ export interface SupplierRegisterPayload {
   longitude: number;
 }
 
-export interface RegisterPayload extends SupplierRegisterPayload {}
+export type RegisterPayload = SupplierRegisterPayload;
 
 export interface AuthUser {
   id: string;
@@ -161,6 +161,10 @@ function resolveAuthUser(response: AuthResponse): AuthenticatedUser | null {
   return null;
 }
 
+export function isDemoAuthEnabled(flag: string | undefined, isDev: boolean) {
+  return isDev && flag === 'true';
+}
+
 export async function loginSupplier(payload: LoginPayload): Promise<AuthResult> {
   try {
     const loginResponse = await api<AuthResponse>('/auth/login', {
@@ -194,7 +198,7 @@ export async function loginSupplier(payload: LoginPayload): Promise<AuthResult> 
       user,
     };
   } catch (error) {
-    if (import.meta.env.DEV) {
+    if (isDemoAuthEnabled(import.meta.env.VITE_ENABLE_DEMO_AUTH, import.meta.env.DEV)) {
       const devUser = normalizeUserShape({
         id: 'dev-user',
         name: 'Fornecedor Demo',
@@ -320,6 +324,14 @@ export async function getMe(): Promise<AuthenticatedUser> {
 
 export function getCompanyNameFromUser(user: AuthenticatedUser) {
   return extractCompanyName(user);
+}
+
+export function isSupplierSession(user: AuthenticatedUser | null | undefined) {
+  if (!user) {
+    return false;
+  }
+
+  return typeof user.supplierId === 'string' && user.supplierId.trim().length > 0;
 }
 
 export async function registerUser(payload: Omit<SupplierRegisterPayload, 'latitude' | 'longitude'>) {

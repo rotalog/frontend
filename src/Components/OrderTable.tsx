@@ -1,6 +1,5 @@
-import type { Dispatch, SetStateAction } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Order, OrderStatus, OrderTimelineEvent, StockItem, StockMovement } from '../types/orders';
+import type { Order, OrderStatus, OrderTimelineEvent, StockItem } from '../types/orders';
 import { OrderApprovalPanel } from './OrderApprovalPanel';
 import { acceptOrder, cancelOrder, dispatchOrder, getOrderTracking, prepareOrder, rejectOrder } from '../services/orders';
 import { mockOrders, orderStatusOptions } from '../data/mockData';
@@ -50,8 +49,6 @@ interface OrderTableProps {
   orders?: Order[];
   onOrdersChange?: (orders: Order[]) => void;
   stock: StockItem[];
-  setStock: Dispatch<SetStateAction<StockItem[]>>;
-  onRegisterStockMovements: (movements: Array<Omit<StockMovement, 'id' | 'createdAt'>>) => void;
 }
 
 type ApiOrderLike = {
@@ -96,9 +93,18 @@ function isRejectedStatus(status: OrderStatus) {
   return status === 'REJEITADO' || status === 'CANCELADO' || status === 'RECUSADO';
 }
 
-export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock, onRegisterStockMovements }: OrderTableProps) {
+function normalizeApiStatus(value: unknown, fallbackStatus: OrderStatus): OrderStatus {
+  if (typeof value !== 'string') {
+    return fallbackStatus;
+  }
+
+  const normalized = value.toUpperCase();
+  return apiToLegacyStatus[normalized] ?? fallbackStatus;
+}
+
+export function OrderTable({ orders: ordersProp, onOrdersChange, stock }: OrderTableProps) {
   const [statusFilter, setStatusFilter] = useState<'ALL' | OrderStatus>('ALL');
-  const [orders, setOrdersState] = useState<Order[]>(ordersProp ?? mockOrders);
+  const [localOrders, setLocalOrders] = useState<Order[]>(mockOrders);
   const [rejectionReasons, setRejectionReasons] = useState<Record<string, string>>({});
   const [timelineByOrder, setTimelineByOrder] = useState<Record<string, OrderTimelineEvent[]>>(() => {
     const baseOrders = ordersProp ?? mockOrders;
@@ -116,36 +122,19 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   const [selectedOrderId, setSelectedOrderId] = useState<string>((ordersProp ?? mockOrders)[0]?.id ?? '');
   const hasInjectedRealtimeOrder = useRef(false);
 
-  const setOrders = (updater: SetStateAction<Order[]>) => {
-    setOrdersState(current => {
-      const next = typeof updater === 'function'
-        ? (updater as (prev: Order[]) => Order[])(current)
-        : updater;
-      onOrdersChange?.(next);
-      return next;
-    });
+  const orders = ordersProp ?? localOrders;
+
+  const setOrders = (updater: Order[] | ((prev: Order[]) => Order[])) => {
+    const next = typeof updater === 'function'
+      ? updater(orders)
+      : updater;
+
+    if (ordersProp === undefined) {
+      setLocalOrders(next);
+    }
+
+    onOrdersChange?.(next);
   };
-
-  useEffect(() => {
-    if (ordersProp !== undefined) {
-      setOrdersState(ordersProp);
-    }
-  }, [ordersProp]);
-
-  useEffect(() => {
-    const missing = orders.filter(order => !timelineByOrder[order.id]);
-    if (missing.length === 0) {
-      return;
-    }
-
-    setTimelineByOrder(current => {
-      const next = { ...current };
-      missing.forEach(order => {
-        next[order.id] = [createTimelineEvent(order.status, `Pedido carregado com status ${statusLabel[order.status]}.`)];
-      });
-      return next;
-    });
-  }, [orders, timelineByOrder]);
 
   useEffect(() => {
     if (ordersProp !== undefined) {
@@ -171,7 +160,8 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
         ],
       };
 
-      setOrders(current => [realtimeOrder, ...current]);
+      setLocalOrders(current => [realtimeOrder, ...current]);
+      onOrdersChange?.([realtimeOrder, ...orders]);
       setTimelineByOrder(current => ({
         ...current,
         [realtimeOrder.id]: [createTimelineEvent('PENDENTE', 'Pedido recebido em tempo real.')],
@@ -183,7 +173,7 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     }, 8000);
 
     return () => window.clearTimeout(timeoutId);
-  }, [ordersProp]);
+  }, [onOrdersChange, orders, ordersProp]);
 
   const filteredOrders = useMemo(() => {
     if (statusFilter === 'ALL') {
@@ -193,20 +183,10 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     return orders.filter(order => order.status === statusFilter);
   }, [orders, statusFilter]);
 
-  useEffect(() => {
-    if (filteredOrders.length === 0) {
-      return;
-    }
-
-    const stillVisible = filteredOrders.some(order => order.id === selectedOrderId);
-    if (!stillVisible) {
-      setSelectedOrderId(filteredOrders[0].id);
-    }
-  }, [filteredOrders, selectedOrderId]);
-
   const selectedOrder = useMemo(() => {
-    return orders.find(order => order.id === selectedOrderId) ?? orders[0] ?? fallbackOrder;
-  }, [orders, selectedOrderId]);
+    const visibleSelected = filteredOrders.find(order => order.id === selectedOrderId);
+    return visibleSelected ?? filteredOrders[0] ?? orders[0] ?? fallbackOrder;
+  }, [filteredOrders, orders, selectedOrderId]);
 
   const selectedTimeline = timelineByOrder[selectedOrder.id] ?? [];
 
@@ -270,15 +250,6 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     };
   }, [selectedOrder.id, selectedOrder.status]);
 
-  const normalizeApiStatus = (value: unknown, fallbackStatus: OrderStatus): OrderStatus => {
-    if (typeof value !== 'string') {
-      return fallbackStatus;
-    }
-
-    const normalized = value.toUpperCase();
-    return apiToLegacyStatus[normalized] ?? fallbackStatus;
-  };
-
   const applyOrderStatusLocally = (orderId: string, nextStatus: OrderStatus) => {
     setOrders(currentOrders =>
       currentOrders.map(order =>
@@ -314,55 +285,6 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     });
   };
 
-  const reserveStockForOrder = (order: Order) => {
-    // fallback local para demonstracao enquanto a reserva/baixa real de estoque fica no backend
-    const movements = order.itens.map(item => ({
-      product: item.nome,
-      type: 'RESERVATION' as const,
-      quantity: item.quantidade,
-      source: `Pedido ${order.id} aceito`,
-    }));
-
-    setStock(currentStock =>
-      currentStock.map(entry => {
-        const orderItem = order.itens.find(item => item.nome === entry.produto);
-        if (!orderItem) {
-          return entry;
-        }
-
-        return { ...entry, reservado: entry.reservado + orderItem.quantidade };
-      }),
-    );
-
-    onRegisterStockMovements(movements);
-  };
-
-  const finalizeDispatchForOrder = (order: Order) => {
-    // fallback local para demonstracao enquanto a reserva/baixa real de estoque fica no backend
-    const movements = order.itens.map(item => ({
-      product: item.nome,
-      type: 'EXIT' as const,
-      quantity: item.quantidade,
-      source: `Pedido ${order.id} despachado`,
-    }));
-
-    setStock(currentStock =>
-      currentStock.map(entry => {
-        const orderItem = order.itens.find(item => item.nome === entry.produto);
-        if (!orderItem) {
-          return entry;
-        }
-
-        return {
-          ...entry,
-          total: Math.max(0, entry.total - orderItem.quantidade),
-          reservado: Math.max(0, entry.reservado - orderItem.quantidade),
-        };
-      }),
-    );
-
-    onRegisterStockMovements(movements);
-  };
 
   const handleAcceptOrder = async () => {
     if (!selectedOrder.id || isSyncingOrder) {
@@ -384,14 +306,13 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       setActionFeedback('Pedido aceito com sincronizacao da API.');
       setUsingLocalOrderFallback(false);
       setApiActionUnavailable(false);
-    } catch {
-      applyOrderStatusLocally(selectedOrder.id, 'ACEITO');
-      reserveStockForOrder(selectedOrder);
-      appendTimeline(selectedOrder.id, createTimelineEvent('ACEITO', 'Pedido aceito e estoque reservado localmente.'));
-      setActionFeedback('API indisponivel. A acao foi simulada localmente.');
-      setOrderActionError('API indisponivel. A acao foi simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
+    } catch (error) {
+      setActionFeedback('');
+      setOrderActionError(error instanceof Error && error.message.trim()
+        ? error.message
+        : 'Nao foi possivel aceitar o pedido na API.');
+      setUsingLocalOrderFallback(false);
+      setApiActionUnavailable(false);
     } finally {
       setIsSyncingOrder('');
     }
@@ -413,23 +334,20 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       setActionFeedback('Pedido recusado com sincronizacao da API.');
       setUsingLocalOrderFallback(false);
       setApiActionUnavailable(false);
-    } catch {
-      applyOrderStatusLocally(selectedOrder.id, 'REJEITADO');
-      setRejectionReasons(current => ({ ...current, [selectedOrder.id]: reason }));
-      appendTimeline(selectedOrder.id, createTimelineEvent('REJEITADO', `Pedido recusado. Motivo: ${reason}`));
-      setActionFeedback('API indisponivel. A acao foi simulada localmente.');
-      setOrderActionError('API indisponivel. A acao foi simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
+    } catch (error) {
+      setActionFeedback('');
+      setOrderActionError(error instanceof Error && error.message.trim()
+        ? error.message
+        : 'Nao foi possivel recusar o pedido na API.');
+      setUsingLocalOrderFallback(false);
+      setApiActionUnavailable(false);
     } finally {
       setIsSyncingOrder('');
     }
   };
 
   const handleConfirmPayment = () => {
-    applyOrderStatusLocally(selectedOrder.id, 'PAGAMENTO_CONFIRMADO');
-    appendTimeline(selectedOrder.id, createTimelineEvent('PAGAMENTO_CONFIRMADO', 'Pagamento confirmado pelo financeiro.'));
-    setActionFeedback('Pagamento confirmado localmente.');
+    setActionFeedback('Confirmacao manual de pagamento nao esta disponivel neste fluxo.');
   };
 
   const handleStartPreparation = async () => {
@@ -447,13 +365,13 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       setActionFeedback('Pedido atualizado pela API para Em Separacao.');
       setUsingLocalOrderFallback(false);
       setApiActionUnavailable(false);
-    } catch {
-      applyOrderStatusLocally(selectedOrder.id, 'EM_SEPARACAO');
-      appendTimeline(selectedOrder.id, createTimelineEvent('EM_SEPARACAO', 'Separacao iniciada no modo local.'));
-      setActionFeedback('API indisponivel. A acao foi simulada localmente.');
-      setOrderActionError('API indisponivel. A acao foi simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
+    } catch (error) {
+      setActionFeedback('');
+      setOrderActionError(error instanceof Error && error.message.trim()
+        ? error.message
+        : 'Nao foi possivel iniciar a separacao na API.');
+      setUsingLocalOrderFallback(false);
+      setApiActionUnavailable(false);
     } finally {
       setIsSyncingOrder('');
     }
@@ -474,14 +392,13 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       setActionFeedback('Pedido despachado com sincronizacao da API.');
       setUsingLocalOrderFallback(false);
       setApiActionUnavailable(false);
-    } catch {
-      finalizeDispatchForOrder(selectedOrder);
-      applyOrderStatusLocally(selectedOrder.id, 'SAIU_PARA_ENTREGA');
-      appendTimeline(selectedOrder.id, createTimelineEvent('SAIU_PARA_ENTREGA', 'Pedido despachado e estoque baixado definitivamente.'));
-      setActionFeedback('API indisponivel. A acao foi simulada localmente.');
-      setOrderActionError('API indisponivel. A acao foi simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
+    } catch (error) {
+      setActionFeedback('');
+      setOrderActionError(error instanceof Error && error.message.trim()
+        ? error.message
+        : 'Nao foi possivel despachar o pedido na API.');
+      setUsingLocalOrderFallback(false);
+      setApiActionUnavailable(false);
     } finally {
       setIsSyncingOrder('');
     }
@@ -502,22 +419,16 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       setActionFeedback('Pedido cancelado com sincronizacao da API.');
       setUsingLocalOrderFallback(false);
       setApiActionUnavailable(false);
-    } catch {
-      applyOrderStatusLocally(selectedOrder.id, 'CANCELADO');
-      appendTimeline(selectedOrder.id, createTimelineEvent('CANCELADO', 'Pedido cancelado no modo local.'));
-      setActionFeedback('API indisponivel. A acao foi simulada localmente.');
-      setOrderActionError('API indisponivel. A acao foi simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
+    } catch (error) {
+      setActionFeedback('');
+      setOrderActionError(error instanceof Error && error.message.trim()
+        ? error.message
+        : 'Nao foi possivel cancelar o pedido na API.');
+      setUsingLocalOrderFallback(false);
+      setApiActionUnavailable(false);
     } finally {
       setIsSyncingOrder('');
     }
-  };
-
-  const handleMarkDelivered = () => {
-    applyOrderStatusLocally(selectedOrder.id, 'ENTREGUE');
-    appendTimeline(selectedOrder.id, createTimelineEvent('ENTREGUE', 'Entrega confirmada pelo fornecedor.'));
-    setActionFeedback('Entrega concluida com sucesso.');
   };
 
   return (
@@ -647,7 +558,6 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
         onStartPreparation={handleStartPreparation}
         onDispatch={handleDispatch}
         onCancel={handleCancelOrder}
-        onMarkDelivered={handleMarkDelivered}
         rejectionReason={rejectionReasons[selectedOrder.id]}
         timeline={selectedTimeline}
         stock={stock}

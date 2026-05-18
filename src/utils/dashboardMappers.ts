@@ -1,6 +1,7 @@
 import type { ApiInventoryItem } from '../types/inventory';
 import type { ApiOrder } from '../types/orders';
 import type { Order, OrderStatus, StockItem } from '../types/orders';
+import type { ApiProduct } from '../types/products';
 
 type GenericSource = Record<string, unknown> | null | undefined;
 
@@ -129,14 +130,46 @@ export function mapApiInventoryToLegacyStock(apiInventory: ApiInventoryItem): St
   const source = apiInventory as Record<string, unknown>;
   const productName = toString(source.productName ?? source.name ?? source.produto, 'Produto');
   const photoUrl = toString(source.photoUrl ?? source.fotoUrl);
+  const productId = toString(source.productId);
 
   return {
+    productId,
     codigo: toString(source.sku ?? source.codigo ?? source.productId, productName.toUpperCase().replace(/\s+/g, '-')),
     produto: productName,
     total: getNumberValue(source, ['quantity', 'totalQuantity', 'total'], 0),
     reservado: getNumberValue(source, ['reservedQuantity', 'reserved', 'reservado'], 0),
     fotoUrl: photoUrl || undefined,
   };
+}
+
+export function mergeSupplierProductsWithInventory(products: ApiProduct[], inventory: ApiInventoryItem[]): StockItem[] {
+  const inventoryByProductId = new Map(inventory.map(item => [item.productId, item]));
+
+  return products.map(product => {
+    const inventoryItem = inventoryByProductId.get(product.id);
+
+    if (inventoryItem) {
+      const mappedInventory = mapApiInventoryToLegacyStock({
+        ...inventoryItem,
+        productName: inventoryItem.productName ?? product.name,
+        sku: inventoryItem.sku ?? product.sku,
+      });
+
+      return {
+        ...mappedInventory,
+        codigo: mappedInventory.codigo || product.sku || product.id,
+        produto: mappedInventory.produto || product.name,
+      };
+    }
+
+    return {
+      productId: product.id,
+      codigo: product.sku ?? product.id,
+      produto: product.name,
+      total: 0,
+      reservado: 0,
+    };
+  });
 }
 
 export function calculateFallbackKpis(orders: Order[], inventory: StockItem[]) {

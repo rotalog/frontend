@@ -1,6 +1,15 @@
 const DEFAULT_API_URL = 'https://api.rotalog.madebyhermes.com/api/v1';
+const DEV_API_PATH = '/api/v1';
 
-export const API_URL = (import.meta.env.VITE_API_URL ?? DEFAULT_API_URL).replace(/\/$/, '');
+export function resolveApiUrl(envUrl: string | undefined, isDev: boolean): string {
+  if (envUrl && envUrl.trim()) {
+    return envUrl.replace(/\/$/, '');
+  }
+
+  return isDev ? DEV_API_PATH : DEFAULT_API_URL;
+}
+
+export const API_URL = resolveApiUrl(import.meta.env.VITE_API_URL, import.meta.env.DEV);
 
 let accessToken: string | null = null;
 

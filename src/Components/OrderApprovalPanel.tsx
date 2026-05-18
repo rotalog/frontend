@@ -12,7 +12,6 @@ interface OrderApprovalPanelProps {
   onStartPreparation: () => void;
   onDispatch: () => void;
   onCancel: () => void;
-  onMarkDelivered: () => void;
   rejectionReason?: string;
   timeline: OrderTimelineEvent[];
   stock: StockItem[];
@@ -48,7 +47,6 @@ export function OrderApprovalPanel({
   onStartPreparation,
   onDispatch,
   onCancel,
-  onMarkDelivered,
   rejectionReason,
   timeline,
   stock,
@@ -226,14 +224,7 @@ export function OrderApprovalPanel({
         )}
 
         {order.status === 'SAIU_PARA_ENTREGA' && (
-          <button
-            type="button"
-            onClick={onMarkDelivered}
-            disabled={isSyncing}
-            className="w-full rounded-lg px-3 py-2 text-sm font-semibold bg-teal-500/20 text-teal-400 border border-teal-500/40 hover:bg-teal-500/30 light:bg-teal-100 light:text-teal-700 light:border-teal-300 transition-colors"
-          >
-            Marcar como Entregue
-          </button>
+          <p className="text-sm text-gray-400 light:text-gray-600">A entrega sera atualizada quando o backend/tracking informar a conclusao.</p>
         )}
 
         {(order.status === 'RECUSADO' || order.status === 'REJEITADO' || order.status === 'CANCELADO') && rejectionReason && (

@@ -79,10 +79,10 @@ O frontend esta configurado para consumir autenticacao em `/api/v1/auth/*` com c
 1. Configure a URL base da API criando um arquivo `.env` na raiz do projeto:
 
 ```env
-VITE_API_BASE_URL=http://localhost:3000
+VITE_API_URL=http://localhost:3000/api/v1
 ```
 
-1. Se frontend e backend estiverem no mesmo dominio, `VITE_API_BASE_URL` pode ficar vazio.
+1. Se frontend e backend estiverem no mesmo dominio, `VITE_API_URL` pode ficar vazio.
 1. As chamadas enviam `credentials: include`, permitindo sessao por cookie.
 
 Rotas de auth usadas no frontend:
@@ -100,5 +100,5 @@ Se aparecer a mensagem de falha de comunicacao:
 
 1. Confirme que o backend esta rodando em `http://localhost:3000`.
 1. Confirme que a API responde em `/api/v1/auth/login`.
-1. Se usar outra porta/host, ajuste `VITE_API_BASE_URL`.
+1. Se usar outra porta/host, ajuste `VITE_API_URL`.
 1. Reinicie o frontend apos alterar `.env`.

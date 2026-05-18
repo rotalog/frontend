@@ -10,6 +10,7 @@ interface StockManagementSectionProps {
   setStock: Dispatch<SetStateAction<StockItem[]>>;
   movements: StockMovement[];
   onRegisterMovements: (movements: Array<Omit<StockMovement, 'id' | 'createdAt'>>) => void;
+  onRefreshStock: () => Promise<void>;
 }
 
 type EditableRowState = Record<string, { total: string; reserved: string }>;
@@ -22,10 +23,6 @@ type ProductEditState = {
   fotoUrl: string;
 };
 
-type StockIdentity = StockItem & {
-  productId?: string;
-  id?: string;
-};
 
 const movementTypeLabels: Record<StockMovementType, string> = {
   ENTRY: 'Entrada',
@@ -73,7 +70,7 @@ async function fileToDataUrl(file: File) {
   });
 }
 
-export function StockManagementSection({ stock, setStock, movements, onRegisterMovements }: StockManagementSectionProps) {
+export function StockManagementSection({ stock, setStock, movements, onRegisterMovements, onRefreshStock }: StockManagementSectionProps) {
   const [editableRows, setEditableRows] = useState<EditableRowState>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [importFeedback, setImportFeedback] = useState('');
@@ -93,10 +90,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
   const [usingLocalStockFallback, setUsingLocalStockFallback] = useState(false);
   const [apiMovements, setApiMovements] = useState<StockMovement[] | null>(null);
 
-  const getStockProductId = (item: StockItem) => {
-    const stockIdentity = item as StockIdentity;
-    return stockIdentity.productId ?? stockIdentity.id ?? item.produto;
-  };
+  const getStockProductId = (item: StockItem) => item.productId;
 
   const buildInventoryUpdatePayload = (
     item: StockItem,
@@ -153,17 +147,13 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     }
   };
 
-  useEffect(() => {
-    const nextEditableRows = stock.reduce<EditableRowState>((acc, item) => {
-      acc[item.produto] = {
-        total: String(item.total),
-        reserved: String(item.reservado),
-      };
-      return acc;
-    }, {});
-
-    setEditableRows(nextEditableRows);
-  }, [stock]);
+  const syncedEditableRows = useMemo(() => stock.reduce<EditableRowState>((acc, item) => {
+    acc[item.produto] = editableRows[item.produto] ?? {
+      total: String(item.total),
+      reserved: String(item.reservado),
+    };
+    return acc;
+  }, {}), [editableRows, stock]);
 
   useEffect(() => {
     let active = true;
@@ -257,7 +247,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
   const handleSaveRow = async (productName: string) => {
     const stockItem = stock.find(item => item.produto === productName);
-    const editable = editableRows[productName];
+    const editable = syncedEditableRows[productName];
 
     if (!stockItem || !editable) {
       return;
@@ -313,7 +303,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     );
   };
 
-  const applyImportedRowsLocally = (rows: Array<{ codigo: string; produto: string; total: number; reservado: number }>) => {
+  const applyImportedRowsLocally = (rows: Array<{ productId: string; codigo: string; produto: string; total: number; reservado: number }>) => {
     let updatedCount = 0;
     const importMovements: Array<Omit<StockMovement, 'id' | 'createdAt'>> = [];
 
@@ -328,6 +318,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
         const previous = byProduct.get(row.produto);
         if (!previous) {
           byProduct.set(row.produto, {
+            productId: row.productId,
             codigo: row.codigo,
             produto: row.produto,
             total: row.total,
@@ -430,6 +421,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
         const cols = line.split(',').map(col => col.trim());
         const fallbackCode = `CSV-${cols[productIndex]?.replace(/\s+/g, '-').toUpperCase()}`;
         return {
+          productId: codeIndex >= 0 ? cols[codeIndex] : fallbackCode,
           codigo: codeIndex >= 0 ? cols[codeIndex] : fallbackCode,
           produto: cols[productIndex],
           total: Number(cols[totalIndex]),
@@ -534,7 +526,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
   });
 
   const handleAddNewProduct = async () => {
-    const { codigo, produto, total, reservado, fotoUrl } = newProduct;
+    const { codigo, produto, total, reservado } = newProduct;
 
     if (!codigo.trim() || !produto.trim()) {
       setImportFeedback('Codigo e descricao sao obrigatorios.');
@@ -549,8 +541,8 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       return;
     }
 
-    if (reservadoNum > totalNum) {
-      setImportFeedback('Reservado nao pode ser maior que total.');
+    if (reservadoNum > 0) {
+      setImportFeedback('O campo reservado e controlado pelos pedidos e deve iniciar em 0.');
       return;
     }
 
@@ -559,57 +551,35 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       return;
     }
 
-    const localInsert = () => {
-      setStock(currentStock => [
-        ...currentStock,
-        {
-          codigo,
-          produto,
-          total: totalNum,
-          reservado: reservadoNum,
-          fotoUrl: fotoUrl || undefined,
-        },
-      ]);
+    setIsSyncingStock(`create-product:${codigo}`);
+    setStockActionError('');
+    setImportError('');
 
-      const movementsToRegister: Array<Omit<StockMovement, 'id' | 'createdAt'>> = [];
+    try {
+      const createdProduct = await createProduct({
+        name: produto,
+        minStockLevel: 0,
+      });
+
       if (totalNum > 0) {
-        movementsToRegister.push({
-          product: produto,
-          type: 'ENTRY',
+        await updateInventory(createdProduct.id, {
           quantity: totalNum,
-          source: 'Novo produto cadastrado',
-        });
-      }
-      if (reservadoNum > 0) {
-        movementsToRegister.push({
-          product: produto,
-          type: 'RESERVATION',
-          quantity: reservadoNum,
-          source: 'Novo produto cadastrado',
+          reason: 'Entrada inicial ao cadastrar produto no painel web',
         });
       }
 
-      if (movementsToRegister.length > 0) {
-        onRegisterMovements(movementsToRegister);
-      }
-    };
-
-    await runWithFallback(
-      `create-product:${codigo}`,
-      async () => {
-        await createProduct({
-          name: produto,
-          minStockLevel: 0,
-        });
-
-        localInsert();
-      },
-      localInsert,
-    );
-
-    setImportFeedback(`Produto "${produto}" cadastrado com sucesso!`);
-    setNewProduct({ codigo: '', produto: '', total: '0', reservado: '0', fotoUrl: '' });
-    setShowNewProductForm(false);
+      await onRefreshStock();
+      setUsingLocalStockFallback(false);
+      setImportFeedback(`Produto "${produto}" cadastrado com sucesso!`);
+      setNewProduct({ codigo: '', produto: '', total: '0', reservado: '0', fotoUrl: '' });
+      setShowNewProductForm(false);
+    } catch (error) {
+      setUsingLocalStockFallback(false);
+      setImportFeedback('');
+      setStockActionError(getApiErrorMessage(error));
+    } finally {
+      setIsSyncingStock('');
+    }
   };
 
   const handleOpenEditModal = (item: StockItem) => {
@@ -633,7 +603,6 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     const produto = editingProduct.produto.trim();
     const total = Number(editingProduct.total);
     const reservado = Number(editingProduct.reservado);
-    const fotoUrl = editingProduct.fotoUrl.trim();
 
     if (!codigo || !produto) {
       setEditModalError('Codigo e descricao sao obrigatorios.');
@@ -642,11 +611,6 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
     if (!Number.isFinite(total) || !Number.isFinite(reservado) || total < 0 || reservado < 0) {
       setEditModalError('Valores invalidos. Use numeros positivos.');
-      return;
-    }
-
-    if (reservado > total) {
-      setEditModalError('Reservado nao pode ser maior que total.');
       return;
     }
 
@@ -661,6 +625,11 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     const previous = stock.find(item => item.codigo === editingProduct.originalCodigo);
     if (!previous) {
       setEditModalError('Produto nao encontrado para edicao.');
+      return;
+    }
+
+    if (reservado !== previous.reservado) {
+      setEditModalError('O campo reservado e controlado pelo fluxo de pedidos.');
       return;
     }
 
@@ -702,44 +671,37 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
     const productId = String(getStockProductId(previous));
 
-    const localUpdate = () => {
-      updateStockItemLocally(productId, {
-        codigo,
-        produto,
-        total,
-        reservado,
-        fotoUrl: fotoUrl || undefined,
+    setIsSyncingStock(`update-product:${productId}`);
+    setStockActionError('');
+
+    try {
+      await updateProduct(productId, {
+        name: produto,
+        minStockLevel: 0,
       });
 
-      if (movementsToRegister.length > 0) {
-        onRegisterMovements(movementsToRegister);
+      const inventoryPayload = buildInventoryUpdatePayload(previous, {
+        total,
+      });
+
+      if (total < previous.total) {
+        throw new Error('Reducao manual de estoque nao esta disponivel neste fluxo.');
       }
-    };
 
-    await runWithFallback(
-      `update-product:${productId}`,
-      async () => {
-        await updateProduct(productId, {
-          name: produto,
-          minStockLevel: 0,
-        });
+      if (inventoryPayload) {
+        await updateInventory(productId, inventoryPayload);
+      }
 
-        const inventoryPayload = buildInventoryUpdatePayload(previous, {
-          total,
-        });
-
-        if (inventoryPayload) {
-          await updateInventory(productId, inventoryPayload);
-        }
-
-        localUpdate();
-      },
-      localUpdate,
-    );
-
-    setImportFeedback(`Produto "${produto}" atualizado com sucesso.`);
-    setEditingProduct(null);
-    setEditModalError('');
+      await onRefreshStock();
+      setImportFeedback(`Produto "${produto}" atualizado com sucesso.`);
+      setEditingProduct(null);
+      setEditModalError('');
+    } catch (error) {
+      setImportFeedback('');
+      setStockActionError(getApiErrorMessage(error));
+    } finally {
+      setIsSyncingStock('');
+    }
   };
 
   const handleDeleteProductFromModal = async () => {
@@ -755,33 +717,21 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
     const productId = String(getStockProductId(previous));
 
-    const localDelete = () => {
-      setStock(currentStock => currentStock.filter(item => getStockProductId(item) !== productId));
+    setIsSyncingStock(`delete-product:${productId}`);
+    setStockActionError('');
 
-      if (previous.total > 0) {
-        onRegisterMovements([
-          {
-            product: previous.produto,
-            type: 'EXIT',
-            quantity: previous.total,
-            source: 'Produto removido do catalogo',
-          },
-        ]);
-      }
-    };
-
-    await runWithFallback(
-      `delete-product:${productId}`,
-      async () => {
-        await deleteProduct(productId);
-        localDelete();
-      },
-      localDelete,
-    );
-
-    setImportFeedback(`Produto "${previous.produto}" removido.`);
-    setEditingProduct(null);
-    setEditModalError('');
+    try {
+      await deleteProduct(productId);
+      await onRefreshStock();
+      setImportFeedback(`Produto "${previous.produto}" removido.`);
+      setEditingProduct(null);
+      setEditModalError('');
+    } catch (error) {
+      setImportFeedback('');
+      setStockActionError(getApiErrorMessage(error));
+    } finally {
+      setIsSyncingStock('');
+    }
   };
 
   return (
@@ -957,7 +907,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
               {filteredStock.map(item => {
                 const available = item.total - item.reservado;
                 const isLowStock = available <= 20;
-                const rowEdit = editableRows[item.produto] ?? { total: String(item.total), reserved: String(item.reservado) };
+                const rowEdit = syncedEditableRows[item.produto] ?? { total: String(item.total), reserved: String(item.reservado) };
                 const rowSyncKey = `save-row:${String(getStockProductId(item))}`;
 
                 return (
