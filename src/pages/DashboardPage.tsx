@@ -16,6 +16,12 @@ import {
   getSalesReport,
   getTopProductsReport,
 } from '../services/reports';
+import {
+  getProductRatingSummary,
+  getProductReviews,
+  getSupplierRatingSummary,
+  getSupplierReviews,
+} from '../services/reviews';
 import { completeRoute, generateRoute, getRoutePoints, getRoutes, getTodayRoutes, startRoute } from '../services/routes';
 import { getCurrentUser } from '../services/auth';
 import type { ApiInventoryItem } from '../types/inventory';
@@ -29,6 +35,7 @@ import type {
   SalesReport,
   TopProductReport,
 } from '../types/reports';
+import type { RatingSummaryResponse, ReviewResponse } from '../types/reviews';
 import {
   calculateFallbackKpis,
   getNumberValue,
@@ -70,6 +77,12 @@ type DashboardStockRow = {
   product: string;
   available: number;
   reserved: number;
+};
+
+const EMPTY_RATING_SUMMARY: RatingSummaryResponse = {
+  averageRating: 0,
+  totalReviews: 0,
+  ratingDistribution: {},
 };
 
 function mapProductAndInventoryToStock(products: ApiProduct[], inventory: ApiInventoryItem[]) {
@@ -243,6 +256,16 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   const [reportExportMessage, setReportExportMessage] = useState('');
   const [reportExportError, setReportExportError] = useState('');
   const [hasLoadedReports, setHasLoadedReports] = useState(false);
+  const [supplierId, setSupplierId] = useState('');
+  const [isLoadingSupplierReviews, setIsLoadingSupplierReviews] = useState(false);
+  const [supplierReviewsError, setSupplierReviewsError] = useState('');
+  const [supplierReviews, setSupplierReviews] = useState<ReviewResponse[]>([]);
+  const [supplierRatingSummary, setSupplierRatingSummary] = useState<RatingSummaryResponse>(EMPTY_RATING_SUMMARY);
+  const [hasLoadedSupplierReviews, setHasLoadedSupplierReviews] = useState(false);
+  const [isLoadingHighlightedProductReviews, setIsLoadingHighlightedProductReviews] = useState(false);
+  const [highlightedProductReviewsError, setHighlightedProductReviewsError] = useState('');
+  const [highlightedProductReviews, setHighlightedProductReviews] = useState<ReviewResponse[]>([]);
+  const [highlightedProductRatingSummary, setHighlightedProductRatingSummary] = useState<RatingSummaryResponse>(EMPTY_RATING_SUMMARY);
 
   // Raw API responses — consumed by derived state below and available for future tabs.
   const hasApiData = useMemo(
@@ -269,14 +292,16 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         getCurrentUser(),
       ]);
 
-      const supplierId = currentUserResult.status === 'fulfilled' ? currentUserResult.value.supplierId : undefined;
-      const productsResult = supplierId
-        ? await Promise.allSettled([getSupplierProducts(supplierId)]).then(results => results[0])
+      const currentSupplierId = currentUserResult.status === 'fulfilled' ? currentUserResult.value.supplierId : undefined;
+      const productsResult = currentSupplierId
+        ? await Promise.allSettled([getSupplierProducts(currentSupplierId)]).then(results => results[0])
         : await Promise.resolve({ status: 'fulfilled', value: [] } as PromiseFulfilledResult<ApiProduct[]>);
 
       if (!active) {
         return;
       }
+
+      setSupplierId(typeof currentSupplierId === 'string' ? currentSupplierId : '');
 
       let hasSuccess = false;
       let hasMockFallback = false;
@@ -566,6 +591,149 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     };
   }, [hasLoadedReports, isReportsView]);
 
+  const highlightedProductId = useMemo(() => {
+    const firstInventoryItem = apiInventory.find(item => isValidApiId(item.productId));
+    return firstInventoryItem?.productId ?? '';
+  }, [apiInventory]);
+
+  const getReviewsErrorMessage = (error: unknown): string => {
+    if (error instanceof ApiError) {
+      if (error.status === 403) {
+        return 'Você não tem permissão para acessar avaliações.';
+      }
+
+      if (error.status >= 500) {
+        return 'Erro interno ao carregar avaliações.';
+      }
+
+      if (error.status === 404) {
+        return 'Nenhuma avaliação encontrada.';
+      }
+    }
+
+    return 'Não foi possível carregar as avaliações.';
+  };
+
+  useEffect(() => {
+    if (!isReportsView || hasLoadedSupplierReviews) {
+      return;
+    }
+
+    let active = true;
+
+    const loadSupplierReviews = async () => {
+      setIsLoadingSupplierReviews(true);
+      setSupplierReviewsError('');
+
+      if (!isValidApiId(supplierId)) {
+        if (!active) {
+          return;
+        }
+
+        setSupplierReviews([]);
+        setSupplierRatingSummary(EMPTY_RATING_SUMMARY);
+        setHasLoadedSupplierReviews(true);
+        setIsLoadingSupplierReviews(false);
+        return;
+      }
+
+      const [reviewsResult, summaryResult] = await Promise.allSettled([
+        getSupplierReviews(supplierId),
+        getSupplierRatingSummary(supplierId),
+      ]);
+
+      if (!active) {
+        return;
+      }
+
+      if (reviewsResult.status === 'fulfilled') {
+        setSupplierReviews(reviewsResult.value);
+      } else {
+        setSupplierReviews([]);
+      }
+
+      if (summaryResult.status === 'fulfilled') {
+        setSupplierRatingSummary(summaryResult.value);
+      } else {
+        setSupplierRatingSummary(EMPTY_RATING_SUMMARY);
+      }
+
+      if (reviewsResult.status === 'rejected' && summaryResult.status === 'rejected') {
+        setSupplierReviewsError(getReviewsErrorMessage(reviewsResult.reason));
+      }
+
+      setHasLoadedSupplierReviews(true);
+      setIsLoadingSupplierReviews(false);
+    };
+
+    void loadSupplierReviews();
+
+    return () => {
+      active = false;
+    };
+  }, [hasLoadedSupplierReviews, isReportsView, supplierId]);
+
+  useEffect(() => {
+    if (!isReportsView) {
+      return;
+    }
+
+    let active = true;
+
+    const loadHighlightedProductReviews = async () => {
+      setIsLoadingHighlightedProductReviews(true);
+      setHighlightedProductReviewsError('');
+
+      if (!isValidApiId(highlightedProductId)) {
+        if (!active) {
+          return;
+        }
+
+        setHighlightedProductReviews([]);
+        setHighlightedProductRatingSummary(EMPTY_RATING_SUMMARY);
+        setIsLoadingHighlightedProductReviews(false);
+        return;
+      }
+
+      const [reviewsResult, summaryResult] = await Promise.allSettled([
+        getProductReviews(highlightedProductId),
+        getProductRatingSummary(highlightedProductId),
+      ]);
+
+      if (!active) {
+        return;
+      }
+
+      if (reviewsResult.status === 'fulfilled') {
+        setHighlightedProductReviews(reviewsResult.value);
+      } else {
+        setHighlightedProductReviews([]);
+      }
+
+      if (summaryResult.status === 'fulfilled') {
+        setHighlightedProductRatingSummary(summaryResult.value);
+      } else {
+        setHighlightedProductRatingSummary(EMPTY_RATING_SUMMARY);
+      }
+
+      if (reviewsResult.status === 'rejected' && summaryResult.status === 'rejected') {
+        setHighlightedProductReviewsError(getReviewsErrorMessage(reviewsResult.reason));
+      }
+
+      setIsLoadingHighlightedProductReviews(false);
+    };
+
+    void loadHighlightedProductReviews();
+
+    return () => {
+      active = false;
+    };
+  }, [highlightedProductId, isReportsView]);
+
+  useEffect(() => {
+    setHasLoadedSupplierReviews(false);
+  }, [supplierId]);
+
   const handleExportOrdersReport = async () => {
     setIsExportingOrdersReport(true);
     setReportExportError('');
@@ -592,6 +760,141 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       style: 'currency',
       currency: 'BRL',
     }).format(value);
+  };
+
+  const formatReviewDate = (rawDate?: string): string => {
+    if (!rawDate) {
+      return 'Data não informada';
+    }
+
+    const parsed = new Date(rawDate);
+    if (Number.isNaN(parsed.getTime())) {
+      return 'Data não informada';
+    }
+
+    return new Intl.DateTimeFormat('pt-BR', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    }).format(parsed);
+  };
+
+  const recentSupplierReviews = useMemo(() => {
+    return [...supplierReviews]
+      .sort((a, b) => {
+        const aTime = new Date(String(a.createdAt ?? '')).getTime();
+        const bTime = new Date(String(b.createdAt ?? '')).getTime();
+        return bTime - aTime;
+      })
+      .slice(0, 3);
+  }, [supplierReviews]);
+
+  const recentHighlightedProductReviews = useMemo(() => {
+    return [...highlightedProductReviews]
+      .sort((a, b) => {
+        const aTime = new Date(String(a.createdAt ?? '')).getTime();
+        const bTime = new Date(String(b.createdAt ?? '')).getTime();
+        return bTime - aTime;
+      })
+      .slice(0, 2);
+  }, [highlightedProductReviews]);
+
+  const supplierAverageRating = Number(supplierRatingSummary.averageRating ?? 0);
+  const supplierTotalReviews = Number(supplierRatingSummary.totalReviews ?? supplierReviews.length);
+  const highlightedProductAverageRating = Number(highlightedProductRatingSummary.averageRating ?? 0);
+  const highlightedProductTotalReviews = Number(highlightedProductRatingSummary.totalReviews ?? highlightedProductReviews.length);
+
+  const renderReviewsInsights = () => {
+    return (
+      <div className="mt-8 grid grid-cols-1 xl:grid-cols-2 gap-5">
+        <div className="rounded-lg border border-[#222222] bg-[#181818] p-5 light:border-gray-200 light:bg-gray-50">
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-white dark:text-white light:text-gray-900">Avaliação do fornecedor</h3>
+              <p className="mt-1 text-xs text-gray-500 light:text-gray-600">Média atual e comentários recentes</p>
+            </div>
+            <span className="rounded-full bg-[#00ff66]/15 px-3 py-1 text-xs font-semibold text-[#00ff66] light:bg-green-100 light:text-green-700">
+              {supplierAverageRating.toFixed(1)} / 5
+            </span>
+          </div>
+
+          <p className="mb-4 text-xs text-gray-500 light:text-gray-600">Total de avaliações: {supplierTotalReviews}</p>
+
+          {isLoadingSupplierReviews && (
+            <p className="text-xs text-gray-500 light:text-gray-600">Carregando avaliações...</p>
+          )}
+
+          {!isLoadingSupplierReviews && supplierReviewsError && (
+            <p className="text-xs text-amber-300 light:text-amber-700">{supplierReviewsError}</p>
+          )}
+
+          {!isLoadingSupplierReviews && !supplierReviewsError && recentSupplierReviews.length === 0 && (
+            <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma avaliação recebida ainda.</p>
+          )}
+
+          {!isLoadingSupplierReviews && !supplierReviewsError && recentSupplierReviews.length > 0 && (
+            <div className="space-y-3">
+              {recentSupplierReviews.map(review => (
+                <div key={review.id} className="rounded-md border border-[#262626] bg-[#121212] p-3 light:border-gray-200 light:bg-white">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-amber-300 light:text-amber-700">
+                      Nota {Number(review.rating ?? 0).toFixed(1)} / 5
+                    </span>
+                    <span className="text-[11px] text-gray-500 light:text-gray-600">{formatReviewDate(typeof review.createdAt === 'string' ? review.createdAt : undefined)}</span>
+                  </div>
+                  <p className="text-sm text-gray-300 light:text-gray-700">
+                    {typeof review.comment === 'string' && review.comment.trim() ? review.comment : 'Sem comentário.'}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-[#222222] bg-[#181818] p-5 light:border-gray-200 light:bg-gray-50">
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-white dark:text-white light:text-gray-900">Avaliação de produto em destaque</h3>
+              <p className="mt-1 text-xs text-gray-500 light:text-gray-600">Resumo do primeiro produto com estoque disponível</p>
+            </div>
+            <span className="rounded-full bg-sky-500/15 px-3 py-1 text-xs font-semibold text-sky-300 light:bg-sky-100 light:text-sky-700">
+              {highlightedProductAverageRating.toFixed(1)} / 5
+            </span>
+          </div>
+
+          <p className="mb-4 text-xs text-gray-500 light:text-gray-600">Total de avaliações: {highlightedProductTotalReviews}</p>
+
+          {isLoadingHighlightedProductReviews && (
+            <p className="text-xs text-gray-500 light:text-gray-600">Carregando avaliações do produto...</p>
+          )}
+
+          {!isLoadingHighlightedProductReviews && highlightedProductReviewsError && (
+            <p className="text-xs text-amber-300 light:text-amber-700">{highlightedProductReviewsError}</p>
+          )}
+
+          {!isLoadingHighlightedProductReviews && !highlightedProductReviewsError && recentHighlightedProductReviews.length === 0 && (
+            <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma avaliação encontrada.</p>
+          )}
+
+          {!isLoadingHighlightedProductReviews && !highlightedProductReviewsError && recentHighlightedProductReviews.length > 0 && (
+            <div className="space-y-3">
+              {recentHighlightedProductReviews.map(review => (
+                <div key={review.id} className="rounded-md border border-[#262626] bg-[#121212] p-3 light:border-gray-200 light:bg-white">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-amber-300 light:text-amber-700">
+                      Nota {Number(review.rating ?? 0).toFixed(1)} / 5
+                    </span>
+                    <span className="text-[11px] text-gray-500 light:text-gray-600">{formatReviewDate(typeof review.createdAt === 'string' ? review.createdAt : undefined)}</span>
+                  </div>
+                  <p className="text-sm text-gray-300 light:text-gray-700">
+                    {typeof review.comment === 'string' && review.comment.trim() ? review.comment : 'Sem comentário.'}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
   };
 
   const registerStockMovements = (newMovements: Array<Omit<StockMovement, 'id' | 'createdAt'>>) => {
@@ -1315,6 +1618,8 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
                 <p className="text-sm text-gray-500 light:text-gray-600">Nenhum produto vendido ainda.</p>
               )}
             </div>
+
+            {renderReviewsInsights()}
           </div>
         </section>
       );
@@ -1586,6 +1891,8 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
             />
             <KpiCard label="Faturamento" value={formatCurrency(salesRevenue)} />
           </div>
+
+          {renderReviewsInsights()}
         </div>
       );
     }
