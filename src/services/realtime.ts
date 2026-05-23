@@ -6,7 +6,7 @@ import type {
   TrackingLocationPayload,
 } from '../types/realtime';
 
-const WS_URL = import.meta.env.VITE_WS_URL ?? 'ws://localhost:8080/ws';
+const WS_URL = import.meta.env.VITE_WS_URL ?? 'wss://api.rotalog.madebyhermes.com/ws';
 
 type RealtimeClientOptions = {
   onConnect?: () => void;

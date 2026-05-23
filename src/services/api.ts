@@ -1,6 +1,7 @@
 const DEFAULT_API_URL = 'https://api.rotalog.madebyhermes.com/api/v1';
 
 export const API_URL = (import.meta.env.VITE_API_URL ?? DEFAULT_API_URL).replace(/\/$/, '');
+const USE_API = String(import.meta.env.VITE_USE_API ?? 'true').toLowerCase() !== 'false';
 
 let accessToken: string | null = null;
 
@@ -84,6 +85,10 @@ export async function api<T>(
   options: RequestInit = {},
   retry = true,
 ): Promise<T> {
+  if (!USE_API) {
+    throw new ApiError('Uso da API desabilitado em VITE_USE_API.', 503, { path });
+  }
+
   const headers = new Headers(options.headers ?? undefined);
   const body = options.body;
 

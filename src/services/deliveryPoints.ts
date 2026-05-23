@@ -7,15 +7,19 @@ export interface DeliveryPointProofPayload {
   [key: string]: unknown;
 }
 
-export interface DeliveryPointFailPayload {
-  reason: string;
-  note?: string;
-  [key: string]: unknown;
+export interface DeliveryPointArrivePayload {
+  driverLatitude: number;
+  driverLongitude: number;
 }
 
-export async function arriveDeliveryPoint(id: string) {
+export interface DeliveryPointFailPayload {
+  reason: string;
+}
+
+export async function arriveDeliveryPoint(id: string, payload: DeliveryPointArrivePayload) {
   return api<{ id: string; status?: string; [key: string]: unknown }>(`/delivery-points/${id}/arrive`, {
     method: 'PUT',
+    body: JSON.stringify(payload),
   });
 }
 
@@ -37,6 +41,8 @@ export async function sendDeliveryProof(id: string, payload: DeliveryPointProofP
 export async function failDeliveryPoint(id: string, payload: DeliveryPointFailPayload) {
   return api<{ id: string; status?: string; [key: string]: unknown }>(`/delivery-points/${id}/fail`, {
     method: 'PUT',
-    body: JSON.stringify(payload),
+    body: JSON.stringify({
+      reason: payload.reason,
+    }),
   });
 }

@@ -53,7 +53,6 @@ export type ApiOrderStatus =
   | 'CANCELED'
   | 'PREPARING'
   | 'DISPATCHED'
-  | 'DELIVERED'
   | string;
 
 export interface ApiOrderItem {

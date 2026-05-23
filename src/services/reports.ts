@@ -82,10 +82,10 @@ export async function exportOrders(format: 'xlsx' | 'csv' = 'xlsx') {
 
 export async function exportInventory(format: 'xlsx' | 'csv' = 'xlsx') {
   void format;
-  throw new Error('Exportacao de inventario nao disponivel no backend atual.');
+  throw new Error('Exportacao ainda nao disponivel no backend.');
 }
 
 export async function exportDeliveries(format: 'xlsx' | 'csv' = 'xlsx') {
   void format;
-  throw new Error('Exportacao de entregas nao disponivel no backend atual.');
+  throw new Error('Exportacao ainda nao disponivel no backend.');
 }
