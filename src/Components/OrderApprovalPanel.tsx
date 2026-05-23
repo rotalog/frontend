@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import * as XLSX from 'xlsx';
 import type { Order, OrderStatus, OrderTimelineEvent, StockItem } from '../types/orders';
+import type { PaymentResponse } from '../types/payments';
 
 interface OrderApprovalPanelProps {
-  order: Order;
+  order: Order | null;
   statusLabel: Record<OrderStatus, string>;
   statusStyle: Record<OrderStatus, string>;
   statusLabelOverride?: string;
@@ -19,6 +20,15 @@ interface OrderApprovalPanelProps {
   stock: StockItem[];
   actionFeedback?: string;
   isSyncing?: boolean;
+  payment: PaymentResponse | null;
+  paymentStatusLabel: string;
+  paymentError?: string;
+  paymentFeedback?: string;
+  isLoadingPayment?: boolean;
+  isCreatingPayment?: boolean;
+  onCreatePayment: () => void;
+  isActionDisabled?: boolean;
+  actionDisabledMessage?: string;
 }
 
 function formatCurrency(value: number) {
@@ -56,9 +66,30 @@ export function OrderApprovalPanel({
   stock,
   actionFeedback,
   isSyncing = false,
+  payment,
+  paymentStatusLabel,
+  paymentError,
+  paymentFeedback,
+  isLoadingPayment = false,
+  isCreatingPayment = false,
+  onCreatePayment,
+  isActionDisabled = false,
+  actionDisabledMessage,
 }: OrderApprovalPanelProps) {
   const [rejectionInput, setRejectionInput] = useState('');
   const [showRejectError, setShowRejectError] = useState(false);
+
+  if (!order) {
+    return (
+      <aside className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5 h-fit">
+        <h3 className="text-base font-semibold text-white dark:text-white light:text-gray-900">Painel de detalhes</h3>
+        <p className="mt-4 text-sm text-gray-300 light:text-gray-700">Nenhum pedido selecionado.</p>
+        <p className="mt-2 text-sm text-gray-500 light:text-gray-600">
+          Quando houver pedidos reais, selecione um item da lista para ver os detalhes.
+        </p>
+      </aside>
+    );
+  }
 
   const handleExportTimelineXlsx = () => {
     if (timeline.length === 0) {
@@ -110,6 +141,64 @@ export function OrderApprovalPanel({
         <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{formatCurrency(order.valorTotal)}</p>
       </div>
 
+      <div className="border-t border-[#222222] light:border-gray-200 pt-4 mb-4">
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">Pagamento</p>
+          <button
+            type="button"
+            onClick={onCreatePayment}
+            disabled={isCreatingPayment || isActionDisabled}
+            className="rounded-md px-2.5 py-1 text-xs font-semibold bg-sky-500/20 text-sky-400 border border-sky-500/40 hover:bg-sky-500/30 light:bg-sky-100 light:text-sky-700 light:border-sky-300 transition-colors disabled:opacity-60"
+          >
+            {isCreatingPayment ? 'Criando...' : 'Criar pagamento'}
+          </button>
+        </div>
+
+        {isActionDisabled && actionDisabledMessage && (
+          <p className="text-xs text-amber-300 light:text-amber-700 mb-2">{actionDisabledMessage}</p>
+        )}
+
+        {isLoadingPayment && (
+          <p className="text-xs text-gray-500 light:text-gray-600">Carregando pagamento...</p>
+        )}
+
+        {!isLoadingPayment && !payment && !paymentError && (
+          <p className="text-xs text-gray-500 light:text-gray-600">Pagamento ainda não gerado.</p>
+        )}
+
+        {paymentError && (
+          <p className="text-xs text-amber-300 light:text-amber-700">{paymentError}</p>
+        )}
+
+        {paymentFeedback && (
+          <p className="text-xs text-[#00ff66] light:text-green-700 mt-1">{paymentFeedback}</p>
+        )}
+
+        {payment && (
+          <div className="space-y-2 mt-2">
+            <p className="text-xs text-gray-500 light:text-gray-600">Status</p>
+            <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{paymentStatusLabel}</p>
+
+            <p className="text-xs text-gray-500 light:text-gray-600">Valor</p>
+            <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{formatCurrency(Number(payment.amount ?? order.valorTotal ?? 0))}</p>
+
+            {payment.paymentUrl && (
+              <p className="text-xs text-gray-400 light:text-gray-600 break-all">
+                Link: <a href={payment.paymentUrl} target="_blank" rel="noreferrer" className="text-[#00ff66] light:text-green-700 underline">{payment.paymentUrl}</a>
+              </p>
+            )}
+
+            {payment.qrCode && (
+              <p className="text-xs text-gray-400 light:text-gray-600 break-all">QR Code: {payment.qrCode}</p>
+            )}
+
+            {payment.qrCodeText && (
+              <p className="text-xs text-gray-400 light:text-gray-600 break-all">Pix copia e cola: {payment.qrCodeText}</p>
+            )}
+          </div>
+        )}
+      </div>
+
       <div className="border-t border-[#222222] light:border-gray-200 pt-4">
         <p className="text-sm font-medium text-white dark:text-white light:text-gray-900 mb-3">Itens do pedido</p>
         <ul className="space-y-2 mb-4">
@@ -132,7 +221,7 @@ export function OrderApprovalPanel({
           })}
         </ul>
 
-        {(order.status === 'SOLICITADO' || order.status === 'PENDENTE') && (
+        {!isActionDisabled && (order.status === 'SOLICITADO' || order.status === 'PENDENTE') && (
           <>
             <div className="space-y-2 mb-4">
               <label htmlFor="rejectionReason" className="block text-sm font-medium text-white dark:text-white light:text-gray-900">
@@ -177,7 +266,7 @@ export function OrderApprovalPanel({
           </>
         )}
 
-        {order.status === 'ACEITO' && (
+        {!isActionDisabled && order.status === 'ACEITO' && (
           <button
             type="button"
             onClick={onConfirmPayment}
@@ -188,7 +277,7 @@ export function OrderApprovalPanel({
           </button>
         )}
 
-        {order.status === 'PAGAMENTO_CONFIRMADO' && (
+        {!isActionDisabled && order.status === 'PAGAMENTO_CONFIRMADO' && (
           <button
             type="button"
             onClick={onStartPreparation}
@@ -199,7 +288,7 @@ export function OrderApprovalPanel({
           </button>
         )}
 
-        {order.status === 'EM_SEPARACAO' && (
+        {!isActionDisabled && order.status === 'EM_SEPARACAO' && (
           <button
             type="button"
             onClick={onDispatch}
@@ -210,7 +299,7 @@ export function OrderApprovalPanel({
           </button>
         )}
 
-        {(
+        {!isActionDisabled && (
           order.status === 'SOLICITADO' ||
           order.status === 'PENDENTE' ||
           order.status === 'ACEITO' ||
@@ -227,7 +316,7 @@ export function OrderApprovalPanel({
           </button>
         )}
 
-        {order.status === 'SAIU_PARA_ENTREGA' && (
+        {!isActionDisabled && order.status === 'SAIU_PARA_ENTREGA' && (
           <button
             type="button"
             onClick={onMarkDelivered}

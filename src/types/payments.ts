@@ -1,15 +1,29 @@
+export type PaymentStatus =
+  | 'PENDING'
+  | 'PAID'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'EXPIRED'
+  | string;
+
 export interface CreatePaymentPayload {
   orderId: string;
-  method?: string;
   amount?: number;
+  method?: string;
   [key: string]: unknown;
 }
 
-export interface PaymentStatus {
-  orderId: string;
+export interface PaymentResponse {
+  id?: string;
   paymentId?: string;
-  status?: string;
+  orderId: string;
+  status?: PaymentStatus;
   amount?: number;
-  paidAt?: string;
+  paymentUrl?: string;
+  qrCode?: string;
+  qrCodeText?: string;
+  expiresAt?: string;
+  createdAt?: string;
+  updatedAt?: string;
   [key: string]: unknown;
 }

@@ -10,7 +10,12 @@ import { arriveDeliveryPoint, failDeliveryPoint, sendDeliveryProof } from '../se
 import { getInventory } from '../services/inventory';
 import { getOrders } from '../services/orders';
 import { getSupplierProducts } from '../services/products';
-import { getDashboardReport } from '../services/reports';
+import {
+  getAcceptanceRateReport,
+  getDashboardReport,
+  getSalesReport,
+  getTopProductsReport,
+} from '../services/reports';
 import { completeRoute, generateRoute, getRoutePoints, getRoutes, getTodayRoutes, startRoute } from '../services/routes';
 import { getCurrentUser } from '../services/auth';
 import type { ApiInventoryItem } from '../types/inventory';
@@ -18,13 +23,19 @@ import type { ApiProduct } from '../types/products';
 import type { ApiDeliveryPoint, ApiRoute, GenerateRouteStop } from '../types/routes';
 import type { Order, OrderStatus, StockMovement } from '../types/orders';
 import type { ApiOrder } from '../types/orders';
-import type { DashboardReport } from '../types/reports';
+import type {
+  AcceptanceRateReport,
+  DashboardReport,
+  SalesReport,
+  TopProductReport,
+} from '../types/reports';
 import {
   calculateFallbackKpis,
   getNumberValue,
   mapApiInventoryToLegacyStock,
   mapApiOrderToLegacyOrder,
 } from '../utils/dashboardMappers';
+import { exportOrdersToXlsx } from '../utils/exportOrdersReport';
 
 interface DashboardPageProps {
   theme: 'dark' | 'light';
@@ -222,6 +233,16 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   const [usingMockFallback, setUsingMockFallback] = useState(false);
   const [inventoryNotInitialized, setInventoryNotInitialized] = useState(false);
   const [apiWarning, setApiWarning] = useState('');
+  const [isLoadingReports, setIsLoadingReports] = useState(false);
+  const [reportsError, setReportsError] = useState('');
+  const [reportsWarning, setReportsWarning] = useState('');
+  const [salesReport, setSalesReport] = useState<SalesReport | null>(null);
+  const [topProductsReport, setTopProductsReport] = useState<TopProductReport[]>([]);
+  const [acceptanceRateReport, setAcceptanceRateReport] = useState<AcceptanceRateReport | null>(null);
+  const [isExportingOrdersReport, setIsExportingOrdersReport] = useState(false);
+  const [reportExportMessage, setReportExportMessage] = useState('');
+  const [reportExportError, setReportExportError] = useState('');
+  const [hasLoadedReports, setHasLoadedReports] = useState(false);
 
   // Raw API responses — consumed by derived state below and available for future tabs.
   const hasApiData = useMemo(
@@ -436,20 +457,135 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     };
   }, [dashboardReport, fallbackKpis]);
 
-  const reportSummary = useMemo(() => {
-    const accepted = overviewOrders.filter(order => !['RECUSADO', 'REJEITADO', 'CANCELADO'].includes(order.status)).length;
-    const rejected = overviewOrders.filter(order => ['RECUSADO', 'REJEITADO', 'CANCELADO'].includes(order.status)).length;
-    const preparing = overviewOrders.filter(order => order.status === 'EM_SEPARACAO').length;
-    const revenue = overviewOrders
-      .filter(order => !['RECUSADO', 'REJEITADO', 'CANCELADO'].includes(order.status))
-      .reduce((sum, order) => sum + order.valorTotal, 0);
+  const isReportsView = activeOverviewTab === 'RELATORIOS' || activeSection === 'RELATORIOS';
 
-    return { accepted, rejected, preparing, revenue };
-  }, [overviewOrders]);
+  const salesRevenue = useMemo(() => {
+    const raw = Number(salesReport?.totalRevenue ?? 0);
+    return Number.isFinite(raw) ? raw : 0;
+  }, [salesReport]);
+
+  const salesOrders = useMemo(() => {
+    const raw = Number(salesReport?.totalOrders ?? 0);
+    return Number.isFinite(raw) ? raw : 0;
+  }, [salesReport]);
+
+  const acceptanceRateValue = useMemo(() => {
+    const raw = Number(acceptanceRateReport?.acceptanceRate ?? 0);
+    return Number.isFinite(raw) ? raw : 0;
+  }, [acceptanceRateReport]);
+
+  const mappedTopProducts = useMemo(() => {
+    const normalized = topProductsReport.map((item, index) => {
+      const label = String(item.productName ?? item.name ?? `Produto ${index + 1}`);
+      const quantity = Number(item.quantitySold ?? 0);
+      const revenue = Number(item.totalRevenue ?? 0);
+
+      return {
+        key: `${label}-${index}`,
+        label,
+        quantity: Number.isFinite(quantity) ? quantity : 0,
+        revenue: Number.isFinite(revenue) ? revenue : 0,
+      };
+    });
+
+    const maxQuantity = normalized.reduce((max, current) => Math.max(max, current.quantity), 0);
+
+    return normalized.map(item => ({
+      ...item,
+      percent: maxQuantity > 0 ? Math.max(8, Math.round((item.quantity / maxQuantity) * 100)) : 0,
+    }));
+  }, [topProductsReport]);
+
+  const hasSalesData = salesRevenue > 0 || salesOrders > 0 || Array.isArray(salesReport?.series) && salesReport.series.length > 0;
+  const hasTopProductsData = mappedTopProducts.length > 0;
+  const hasAcceptanceDetails = Number(acceptanceRateReport?.totalOrders ?? 0) > 0;
 
   const deliveriesToday = useMemo(() => {
     return overviewOrders.filter(order => order.status === 'SAIU_PARA_ENTREGA' || order.status === 'ENTREGUE');
   }, [overviewOrders]);
+
+  useEffect(() => {
+    if (!isReportsView || hasLoadedReports) {
+      return;
+    }
+
+    let active = true;
+
+    const loadReportsData = async () => {
+      setIsLoadingReports(true);
+      setReportsError('');
+      setReportsWarning('');
+
+      const [salesResult, topProductsResult, acceptanceResult] = await Promise.allSettled([
+        getSalesReport(),
+        getTopProductsReport(),
+        getAcceptanceRateReport(),
+      ]);
+
+      if (!active) {
+        return;
+      }
+
+      let successCount = 0;
+
+      if (salesResult.status === 'fulfilled') {
+        setSalesReport(salesResult.value);
+        successCount += 1;
+      } else {
+        setSalesReport(null);
+      }
+
+      if (topProductsResult.status === 'fulfilled') {
+        setTopProductsReport(topProductsResult.value);
+        successCount += 1;
+      } else {
+        setTopProductsReport([]);
+      }
+
+      if (acceptanceResult.status === 'fulfilled') {
+        setAcceptanceRateReport(acceptanceResult.value);
+        successCount += 1;
+      } else {
+        setAcceptanceRateReport(null);
+      }
+
+      if (successCount === 0) {
+        setReportsError('Não foi possível carregar os relatórios.');
+      } else if (successCount < 3) {
+        setReportsWarning('Algumas informações de relatório ainda não estão disponíveis.');
+      }
+
+      setHasLoadedReports(true);
+      setIsLoadingReports(false);
+    };
+
+    void loadReportsData();
+
+    return () => {
+      active = false;
+    };
+  }, [hasLoadedReports, isReportsView]);
+
+  const handleExportOrdersReport = async () => {
+    setIsExportingOrdersReport(true);
+    setReportExportError('');
+    setReportExportMessage('');
+
+    try {
+      exportOrdersToXlsx(apiOrders);
+
+      setReportExportMessage(
+        apiOrders.length === 0
+          ? 'Relatório vazio exportado com sucesso.'
+          : 'Relatório de pedidos exportado com sucesso.',
+      );
+    } catch (error) {
+      void error;
+      setReportExportError('Não foi possível exportar o relatório de pedidos.');
+    } finally {
+      setIsExportingOrdersReport(false);
+    }
+  };
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('pt-BR', {
@@ -1102,42 +1238,82 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
           <div className="rounded-xl border border-[#222222] bg-[#151515] p-6 md:p-8 light:border-gray-200 light:bg-white">
             <div className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <h2 className="text-base font-semibold !text-white dark:!text-white light:!text-gray-900">Relatório de desempenho</h2>
-              <button type="button" className="text-xs font-bold text-[#00ff66]">Ver completo</button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleExportOrdersReport();
+                }}
+                disabled={isExportingOrdersReport}
+                className="text-xs font-bold text-[#00ff66] disabled:opacity-60"
+              >
+                {isExportingOrdersReport ? 'Exportando...' : 'Exportar pedidos'}
+              </button>
             </div>
+
+            {isLoadingReports && (
+              <p className="mb-4 text-xs text-gray-500 light:text-gray-600">Carregando relatórios...</p>
+            )}
+
+            {reportsError && (
+              <p className="mb-4 text-xs text-amber-300 light:text-amber-700">{reportsError}</p>
+            )}
+
+            {!reportsError && reportsWarning && (
+              <p className="mb-4 text-xs text-amber-300 light:text-amber-700">{reportsWarning}</p>
+            )}
+
+            {reportExportMessage && (
+              <p className="mb-4 text-xs text-[#00ff66] light:text-green-700">{reportExportMessage}</p>
+            )}
+
+            {reportExportError && (
+              <p className="mb-4 text-xs text-amber-300 light:text-amber-700">{reportExportError}</p>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
               <div className="rounded-lg bg-[#181818] p-6 light:bg-gray-50">
                 <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">
-                  {formatCurrency(dashboardKpis.revenueToday)}
+                  {hasSalesData ? formatCurrency(salesRevenue) : 'R$ 0,00'}
                 </h3>
                 <p className="mt-3 text-xs text-gray-500 light:text-gray-600">Faturado hoje</p>
               </div>
               <div className="rounded-lg bg-[#181818] p-6 light:bg-gray-50">
-                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{dashboardKpis.acceptanceRate}%</h3>
+                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{acceptanceRateValue}%</h3>
                 <p className="mt-3 text-xs text-gray-500 light:text-gray-600">Taxa de aceite</p>
+                {!hasAcceptanceDetails && (
+                  <p className="mt-2 text-xs text-gray-500 light:text-gray-600">Sem dados suficientes.</p>
+                )}
               </div>
               <div className="rounded-lg bg-[#181818] p-6 light:bg-gray-50">
-                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{dashboardKpis.monthlyOrders}</h3>
+                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{salesOrders}</h3>
                 <p className="mt-3 text-xs text-gray-500 light:text-gray-600">Pedidos/mês</p>
               </div>
             </div>
 
+            {!hasSalesData && (
+              <p className="mt-4 text-xs text-gray-500 light:text-gray-600">Nenhum dado de venda disponível.</p>
+            )}
+
             <div className="mt-8 border-t border-[#222222] pt-7 light:border-gray-200">
               <p className="mb-5 text-xs uppercase tracking-wide text-gray-500 light:text-gray-600">Mais pedidos esta semana</p>
-              <div className="space-y-5">
-                {dashboardKpis.topProducts.map(product => (
-                  <div key={product.name} className="grid grid-cols-1 sm:grid-cols-[180px_1fr_52px] sm:items-center gap-2 sm:gap-5">
-                    <span className="truncate text-sm text-gray-400 light:text-gray-700">{product.name}</span>
-                    <div className="h-2.5 rounded-full bg-[#262626] light:bg-gray-200">
-                      <div
-                        className="h-2.5 rounded-full bg-[#00ff66]"
-                        style={{ width: `${Math.max(8, product.percent)}%` }}
-                      />
+              {hasTopProductsData ? (
+                <div className="space-y-5">
+                  {mappedTopProducts.map(product => (
+                    <div key={product.key} className="grid grid-cols-1 sm:grid-cols-[180px_1fr_52px] sm:items-center gap-2 sm:gap-5">
+                      <span className="truncate text-sm text-gray-400 light:text-gray-700">{product.label}</span>
+                      <div className="h-2.5 rounded-full bg-[#262626] light:bg-gray-200">
+                        <div
+                          className="h-2.5 rounded-full bg-[#00ff66]"
+                          style={{ width: `${product.percent}%` }}
+                        />
+                      </div>
+                      <span className="text-left text-xs text-gray-500 light:text-gray-600 sm:text-right">{product.quantity}</span>
                     </div>
-                    <span className="text-left text-xs text-gray-500 light:text-gray-600 sm:text-right">{product.percent}%</span>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500 light:text-gray-600">Nenhum produto vendido ainda.</p>
+              )}
             </div>
           </div>
         </section>
@@ -1373,11 +1549,43 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
     if (activeSection === 'RELATORIOS') {
       return (
-        <div className="mt-8 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-          <KpiCard label="Pedidos Aceitos" value={reportSummary.accepted} valueClassName="text-emerald-400 light:text-emerald-700" />
-          <KpiCard label="Pedidos Recusados" value={reportSummary.rejected} valueClassName="text-rose-400 light:text-rose-700" />
-          <KpiCard label="Em Separação" value={reportSummary.preparing} valueClassName="text-amber-400 light:text-amber-700" />
-          <KpiCard label="Faturamento" value={formatCurrency(reportSummary.revenue)} />
+        <div className="mt-8 space-y-4">
+          {isLoadingReports && (
+            <div className="rounded-xl border border-[#222222] light:border-gray-200 bg-[#0d0d0d] dark:bg-[#0d0d0d] light:bg-white p-4 text-sm text-gray-300 light:text-gray-700">
+              Carregando relatórios...
+            </div>
+          )}
+
+          {reportsError && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 light:bg-amber-100 light:text-amber-700">
+              {reportsError}
+            </div>
+          )}
+
+          {!reportsError && reportsWarning && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 light:bg-amber-100 light:text-amber-700">
+              {reportsWarning}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+            <KpiCard
+              label="Pedidos Aceitos"
+              value={acceptanceRateReport?.acceptedOrders ?? 0}
+              valueClassName="text-emerald-400 light:text-emerald-700"
+            />
+            <KpiCard
+              label="Pedidos Recusados"
+              value={acceptanceRateReport?.rejectedOrders ?? 0}
+              valueClassName="text-rose-400 light:text-rose-700"
+            />
+            <KpiCard
+              label="Em Separação"
+              value={dashboardReport?.preparingOrders ?? 0}
+              valueClassName="text-amber-400 light:text-amber-700"
+            />
+            <KpiCard label="Faturamento" value={formatCurrency(salesRevenue)} />
+          </div>
         </div>
       );
     }

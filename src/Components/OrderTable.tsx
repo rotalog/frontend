@@ -3,8 +3,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError } from '../services/api';
 import type { Order, OrderStatus, OrderTimelineEvent, StockItem, StockMovement } from '../types/orders';
 import type { ApiOrder, OrderTrackingResponse } from '../types/orders';
+import type { PaymentResponse } from '../types/payments';
 import { OrderApprovalPanel } from './OrderApprovalPanel';
 import { acceptOrder, cancelOrder, dispatchOrder, getOrderById, getOrderTracking, prepareOrder, rejectOrder } from '../services/orders';
+import { createPayment, getPaymentByOrderId } from '../services/payments';
 import { mockOrders, orderStatusOptions } from '../data/mockData';
 import { mapApiOrderToLegacyOrder } from '../utils/dashboardMappers';
 
@@ -86,15 +88,6 @@ const apiToLegacyStatus: Record<string, OrderStatus> = {
   PAGAMENTO_CONFIRMADO: 'PAGAMENTO_CONFIRMADO',
 };
 
-const fallbackOrder: Order = {
-  id: '',
-  cliente: '',
-  valorTotal: 0,
-  status: 'PENDENTE',
-  dataDesejada: new Date().toISOString(),
-  itens: [],
-};
-
 function isRejectedStatus(status: OrderStatus) {
   return status === 'REJEITADO' || status === 'CANCELADO' || status === 'RECUSADO';
 }
@@ -136,11 +129,16 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   const [actionFeedback, setActionFeedback] = useState<string>('');
   const [isSyncingOrder, setIsSyncingOrder] = useState<string>('');
   const [orderActionError, setOrderActionError] = useState('');
-  const [usingLocalOrderFallback, setUsingLocalOrderFallback] = useState(false);
-  const [apiActionUnavailable, setApiActionUnavailable] = useState(false);
   const [trackingInfoMessage, setTrackingInfoMessage] = useState('');
-  const [selectedOrderId, setSelectedOrderId] = useState<string>((ordersProp ?? mockOrders)[0]?.id ?? '');
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>((ordersProp ?? mockOrders)[0]?.id ?? null);
+  const [paymentData, setPaymentData] = useState<PaymentResponse | null>(null);
+  const [isLoadingPayment, setIsLoadingPayment] = useState(false);
+  const [isCreatingPayment, setIsCreatingPayment] = useState(false);
+  const [paymentError, setPaymentError] = useState('');
+  const [paymentFeedback, setPaymentFeedback] = useState('');
   const hasInjectedRealtimeOrder = useRef(false);
+  void setStock;
+  void onRegisterStockMovements;
 
   const setOrders = (updater: SetStateAction<Order[]>) => {
     setOrdersState(current => {
@@ -221,20 +219,25 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
 
   useEffect(() => {
     if (filteredOrders.length === 0) {
+      setSelectedOrderId(null);
       return;
     }
 
-    const stillVisible = filteredOrders.some(order => order.id === selectedOrderId);
+    const stillVisible = selectedOrderId !== null && filteredOrders.some(order => order.id === selectedOrderId);
     if (!stillVisible) {
-      setSelectedOrderId(filteredOrders[0].id);
+      setSelectedOrderId(filteredOrders[0]?.id ?? null);
     }
   }, [filteredOrders, selectedOrderId]);
 
   const selectedOrder = useMemo(() => {
-    return orders.find(order => order.id === selectedOrderId) ?? orders[0] ?? fallbackOrder;
+    if (!selectedOrderId) {
+      return null;
+    }
+
+    return orders.find(order => order.id === selectedOrderId) ?? null;
   }, [orders, selectedOrderId]);
 
-  const selectedTimeline = timelineByOrder[selectedOrder.id] ?? [];
+  const selectedTimeline = selectedOrder ? (timelineByOrder[selectedOrder.id] ?? []) : [];
 
   const reportData = useMemo(() => {
     const todayRef = '2026-04-26';
@@ -258,7 +261,8 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   }, [orders]);
 
   useEffect(() => {
-    if (!selectedOrder.id) {
+    if (!selectedOrder?.id) {
+      setTrackingInfoMessage('');
       return;
     }
 
@@ -266,7 +270,7 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
 
     const loadTracking = async () => {
       if (!isValidApiId(selectedOrder.id)) {
-        setTrackingInfoMessage('Pedido sem ID real: ação simulada localmente.');
+        setTrackingInfoMessage('Pedido sem ID real: ações indisponíveis.');
         return;
       }
 
@@ -316,10 +320,10 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     return () => {
       active = false;
     };
-  }, [selectedOrder.id, selectedOrder.status]);
+  }, [selectedOrder?.id, selectedOrder?.status]);
 
   useEffect(() => {
-    if (!selectedOrder.id || !isValidApiId(selectedOrder.id)) {
+    if (!selectedOrder?.id || !isValidApiId(selectedOrder.id)) {
       return;
     }
 
@@ -348,7 +352,7 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     return () => {
       active = false;
     };
-  }, [selectedOrder.id]);
+  }, [selectedOrder?.id]);
 
   const normalizeApiStatus = (value: unknown, fallbackStatus: OrderStatus): OrderStatus => {
     if (typeof value !== 'string') {
@@ -416,6 +420,47 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     setOrderActionError('Erro ao atualizar pedido na API.');
   };
 
+  const translatePaymentStatus = (status?: string): string => {
+    if (!status) {
+      return 'Sem status';
+    }
+
+    const normalized = status.toUpperCase();
+    const map: Record<string, string> = {
+      PENDING: 'Pendente',
+      PAID: 'Pago',
+      FAILED: 'Falhou',
+      CANCELLED: 'Cancelado',
+      EXPIRED: 'Expirado',
+    };
+
+    return map[normalized] ?? status;
+  };
+
+  const setPaymentErrorFromApi = (error: unknown) => {
+    if (error instanceof ApiError && error.status === 403) {
+      setPaymentError('Você não tem permissão para executar esta ação.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status === 404) {
+      setPaymentError('Pagamento não encontrado para este pedido.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status === 409) {
+      setPaymentError('Não foi possível criar pagamento para este pedido no status atual.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status >= 500) {
+      setPaymentError('Erro interno ao processar pagamento. Tente novamente em instantes.');
+      return;
+    }
+
+    setPaymentError('Erro ao processar pagamento.');
+  };
+
   const appendTimeline = (orderId: string, event: OrderTimelineEvent) => {
     setTimelineByOrder(current => ({
       ...current,
@@ -435,58 +480,13 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     });
   };
 
-  const reserveStockForOrder = (order: Order) => {
-    // fallback local para demonstracao enquanto a reserva/baixa real de estoque fica no backend
-    const movements = order.itens.map(item => ({
-      product: item.nome,
-      type: 'RESERVATION' as const,
-      quantity: item.quantidade,
-      source: `Pedido ${order.id} aceito`,
-    }));
-
-    setStock(currentStock =>
-      currentStock.map(entry => {
-        const orderItem = order.itens.find(item => item.nome === entry.produto);
-        if (!orderItem) {
-          return entry;
-        }
-
-        return { ...entry, reservado: entry.reservado + orderItem.quantidade };
-      }),
-    );
-
-    onRegisterStockMovements(movements);
-  };
-
-  const finalizeDispatchForOrder = (order: Order) => {
-    // fallback local para demonstracao enquanto a reserva/baixa real de estoque fica no backend
-    const movements = order.itens.map(item => ({
-      product: item.nome,
-      type: 'EXIT' as const,
-      quantity: item.quantidade,
-      source: `Pedido ${order.id} despachado`,
-    }));
-
-    setStock(currentStock =>
-      currentStock.map(entry => {
-        const orderItem = order.itens.find(item => item.nome === entry.produto);
-        if (!orderItem) {
-          return entry;
-        }
-
-        return {
-          ...entry,
-          total: Math.max(0, entry.total - orderItem.quantidade),
-          reservado: Math.max(0, entry.reservado - orderItem.quantidade),
-        };
-      }),
-    );
-
-    onRegisterStockMovements(movements);
-  };
-
   const handleAcceptOrder = async () => {
-    if (!selectedOrder.id || isSyncingOrder) {
+    if (!selectedOrder?.id || isSyncingOrder) {
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
       return;
     }
 
@@ -498,25 +498,11 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     setIsSyncingOrder(selectedOrder.id);
     setOrderActionError('');
 
-    if (!isValidApiId(selectedOrder.id)) {
-      applyOrderStatusLocally(selectedOrder.id, 'ACEITO');
-      reserveStockForOrder(selectedOrder);
-      appendTimeline(selectedOrder.id, createTimelineEvent('ACEITO', 'Pedido aceito e estoque reservado localmente.'));
-      setActionFeedback('Pedido sem ID real: ação simulada localmente.');
-      setOrderActionError('Pedido sem ID real: ação simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
-      setIsSyncingOrder('');
-      return;
-    }
-
     try {
       const response = await acceptOrder(selectedOrder.id);
       const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'ACEITO');
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, 'Pedido aceito via API.'));
       setActionFeedback('Pedido aceito com sincronizacao da API.');
-      setUsingLocalOrderFallback(false);
-      setApiActionUnavailable(false);
     } catch (error) {
       setActionErrorFromApi(error);
     } finally {
@@ -525,24 +511,17 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   };
 
   const handleRejectOrder = async (reason: string) => {
-    if (!selectedOrder.id || isSyncingOrder) {
+    if (!selectedOrder?.id || isSyncingOrder) {
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
       return;
     }
 
     setIsSyncingOrder(selectedOrder.id);
     setOrderActionError('');
-
-    if (!isValidApiId(selectedOrder.id)) {
-      applyOrderStatusLocally(selectedOrder.id, 'REJEITADO');
-      setRejectionReasons(current => ({ ...current, [selectedOrder.id]: reason }));
-      appendTimeline(selectedOrder.id, createTimelineEvent('REJEITADO', `Pedido recusado. Motivo: ${reason}`));
-      setActionFeedback('Pedido sem ID real: ação simulada localmente.');
-      setOrderActionError('Pedido sem ID real: ação simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
-      setIsSyncingOrder('');
-      return;
-    }
 
     try {
       const response = await rejectOrder(selectedOrder.id, reason);
@@ -550,8 +529,6 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       setRejectionReasons(current => ({ ...current, [selectedOrder.id]: reason }));
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, `Pedido recusado via API. Motivo: ${reason}`));
       setActionFeedback('Pedido recusado com sincronizacao da API.');
-      setUsingLocalOrderFallback(false);
-      setApiActionUnavailable(false);
     } catch (error) {
       setActionErrorFromApi(error);
     } finally {
@@ -560,37 +537,115 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   };
 
   const handleConfirmPayment = () => {
+    if (!selectedOrder?.id || !isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
+      return;
+    }
+
     applyOrderStatusLocally(selectedOrder.id, 'PAGAMENTO_CONFIRMADO');
     appendTimeline(selectedOrder.id, createTimelineEvent('PAGAMENTO_CONFIRMADO', 'Pagamento confirmado pelo financeiro.'));
     setActionFeedback('Pagamento confirmado localmente.');
   };
 
+  const handleCreatePayment = async () => {
+    if (!selectedOrder?.id || isCreatingPayment) {
+      return;
+    }
+
+    setIsCreatingPayment(true);
+    setPaymentError('');
+    setPaymentFeedback('');
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setPaymentError('Pedido sem ID real: ações indisponíveis.');
+      setIsCreatingPayment(false);
+      return;
+    }
+
+    const source = selectedOrder as unknown as Record<string, unknown>;
+    const amountCandidate = source.valorTotal ?? source.totalAmount ?? source.amount ?? source.value;
+    const parsedAmount = Number(amountCandidate);
+
+    const payload = Number.isFinite(parsedAmount)
+      ? { orderId: selectedOrder.id, amount: parsedAmount }
+      : { orderId: selectedOrder.id };
+
+    try {
+      const payment = await createPayment(payload);
+      setPaymentData(payment);
+      setPaymentFeedback('Pagamento criado com sucesso.');
+    } catch (error) {
+      setPaymentErrorFromApi(error);
+    } finally {
+      setIsCreatingPayment(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedOrder?.id) {
+      setPaymentData(null);
+      setPaymentError('');
+      setPaymentFeedback('');
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setPaymentData(null);
+      setPaymentError('Pedido sem ID real: ações indisponíveis.');
+      return;
+    }
+
+    let active = true;
+
+    const loadPayment = async () => {
+      setIsLoadingPayment(true);
+      setPaymentError('');
+
+      try {
+        const payment = await getPaymentByOrderId(selectedOrder.id);
+        if (!active) {
+          return;
+        }
+
+        setPaymentData(payment);
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        setPaymentErrorFromApi(error);
+      } finally {
+        if (active) {
+          setIsLoadingPayment(false);
+        }
+      }
+    };
+
+    void loadPayment();
+
+    return () => {
+      active = false;
+    };
+  }, [selectedOrder?.id]);
+
   const handleStartPreparation = async () => {
-    if (!selectedOrder.id || isSyncingOrder) {
+    if (!selectedOrder?.id || isSyncingOrder) {
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
       return;
     }
 
     setIsSyncingOrder(selectedOrder.id);
     setOrderActionError('');
 
-    if (!isValidApiId(selectedOrder.id)) {
-      applyOrderStatusLocally(selectedOrder.id, 'EM_SEPARACAO');
-      appendTimeline(selectedOrder.id, createTimelineEvent('EM_SEPARACAO', 'Separacao iniciada no modo local.'));
-      setActionFeedback('Pedido sem ID real: ação simulada localmente.');
-      setOrderActionError('Pedido sem ID real: ação simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
-      setIsSyncingOrder('');
-      return;
-    }
-
     try {
       const response = await prepareOrder(selectedOrder.id);
       const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'EM_SEPARACAO');
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, 'Separacao iniciada com sincronizacao da API.'));
       setActionFeedback('Pedido atualizado pela API para Em Separacao.');
-      setUsingLocalOrderFallback(false);
-      setApiActionUnavailable(false);
     } catch (error) {
       setActionErrorFromApi(error);
     } finally {
@@ -599,32 +654,23 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   };
 
   const handleDispatch = async () => {
-    if (!selectedOrder.id || isSyncingOrder) {
+    if (!selectedOrder?.id || isSyncingOrder) {
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
       return;
     }
 
     setIsSyncingOrder(selectedOrder.id);
     setOrderActionError('');
 
-    if (!isValidApiId(selectedOrder.id)) {
-      finalizeDispatchForOrder(selectedOrder);
-      applyOrderStatusLocally(selectedOrder.id, 'SAIU_PARA_ENTREGA');
-      appendTimeline(selectedOrder.id, createTimelineEvent('SAIU_PARA_ENTREGA', 'Pedido despachado e estoque baixado definitivamente.'));
-      setActionFeedback('Pedido sem ID real: ação simulada localmente.');
-      setOrderActionError('Pedido sem ID real: ação simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
-      setIsSyncingOrder('');
-      return;
-    }
-
     try {
       const response = await dispatchOrder(selectedOrder.id);
       const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'SAIU_PARA_ENTREGA');
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, 'Pedido despachado com sincronizacao da API.'));
       setActionFeedback('Pedido despachado com sincronizacao da API.');
-      setUsingLocalOrderFallback(false);
-      setApiActionUnavailable(false);
     } catch (error) {
       setActionErrorFromApi(error);
     } finally {
@@ -633,31 +679,23 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   };
 
   const handleCancelOrder = async () => {
-    if (!selectedOrder.id || isSyncingOrder) {
+    if (!selectedOrder?.id || isSyncingOrder) {
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
       return;
     }
 
     setIsSyncingOrder(selectedOrder.id);
     setOrderActionError('');
 
-    if (!isValidApiId(selectedOrder.id)) {
-      applyOrderStatusLocally(selectedOrder.id, 'CANCELADO');
-      appendTimeline(selectedOrder.id, createTimelineEvent('CANCELADO', 'Pedido cancelado no modo local.'));
-      setActionFeedback('Pedido sem ID real: ação simulada localmente.');
-      setOrderActionError('Pedido sem ID real: ação simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
-      setIsSyncingOrder('');
-      return;
-    }
-
     try {
       const response = await cancelOrder(selectedOrder.id);
       const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'CANCELADO');
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, 'Pedido cancelado via API.'));
       setActionFeedback('Pedido cancelado com sincronizacao da API.');
-      setUsingLocalOrderFallback(false);
-      setApiActionUnavailable(false);
     } catch (error) {
       setActionErrorFromApi(error);
     } finally {
@@ -666,6 +704,11 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   };
 
   const handleMarkDelivered = () => {
+    if (!selectedOrder?.id || !isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
+      return;
+    }
+
     applyOrderStatusLocally(selectedOrder.id, 'ENTREGUE');
     appendTimeline(selectedOrder.id, createTimelineEvent('ENTREGUE', 'Entrega confirmada pelo fornecedor.'));
     setActionFeedback('Entrega concluida com sucesso.');
@@ -711,9 +754,6 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
             <p className="text-xs text-gray-400 light:text-gray-600">{trackingInfoMessage}</p>
           )}
 
-          {usingLocalOrderFallback && apiActionUnavailable && (
-            <p className="text-xs text-amber-300 light:text-amber-700">API indisponivel. A acao foi simulada localmente.</p>
-          )}
         </div>
 
         {notification && (
@@ -745,7 +785,7 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
             </thead>
             <tbody>
               {filteredOrders.map(order => {
-                const isSelected = selectedOrder.id === order.id;
+                const isSelected = selectedOrder?.id === order.id;
 
                 return (
                   <tr
@@ -796,7 +836,7 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
         order={selectedOrder}
         statusLabel={statusLabel}
         statusStyle={statusStyle}
-        statusLabelOverride={getOrderStatusLabel(selectedOrder)}
+        statusLabelOverride={selectedOrder ? getOrderStatusLabel(selectedOrder) : undefined}
         onAccept={handleAcceptOrder}
         onReject={handleRejectOrder}
         onConfirmPayment={handleConfirmPayment}
@@ -804,11 +844,20 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
         onDispatch={handleDispatch}
         onCancel={handleCancelOrder}
         onMarkDelivered={handleMarkDelivered}
-        rejectionReason={rejectionReasons[selectedOrder.id]}
+        rejectionReason={selectedOrder ? rejectionReasons[selectedOrder.id] : undefined}
         timeline={selectedTimeline}
         stock={stock}
         actionFeedback={actionFeedback}
-        isSyncing={Boolean(isSyncingOrder) && isSyncingOrder === selectedOrder.id}
+        isSyncing={Boolean(isSyncingOrder) && isSyncingOrder === (selectedOrder?.id ?? '')}
+        payment={paymentData}
+        paymentStatusLabel={translatePaymentStatus(paymentData?.status)}
+        paymentError={paymentError}
+        paymentFeedback={paymentFeedback}
+        isLoadingPayment={isLoadingPayment}
+        isCreatingPayment={isCreatingPayment}
+        onCreatePayment={handleCreatePayment}
+        isActionDisabled={selectedOrder ? !isValidApiId(selectedOrder.id) : false}
+        actionDisabledMessage={selectedOrder && !isValidApiId(selectedOrder.id) ? 'Pedido sem ID real: ações indisponíveis.' : undefined}
       />
 
       <div className="xl:col-span-2 grid grid-cols-1 lg:grid-cols-2 gap-6">
