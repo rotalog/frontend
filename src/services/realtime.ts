@@ -1,151 +1,136 @@
-import { Client, type IMessage } from '@stomp/stompjs';
-import { getAccessToken } from './api';
-import type {
-  OrderNotificationPayload,
-  RouteLocationPayload,
-  TrackingLocationPayload,
-} from '../types/realtime';
+import type { RealtimeConnectionOptions, RealtimeEvent } from '../types/realtime';
 
-const WS_URL = import.meta.env.VITE_WS_URL ?? 'wss://api.rotalog.madebyhermes.com/ws';
+const WS_URL = (import.meta.env.VITE_WS_URL ?? '').trim();
+const MAX_RECONNECT_ATTEMPTS = 3;
+const BASE_RECONNECT_DELAY_MS = 2000;
 
-type RealtimeClientOptions = {
-  onConnect?: () => void;
-  onDisconnect?: () => void;
-};
-
-function logDevError(...args: unknown[]) {
+function logDev(...args: unknown[]) {
   if (import.meta.env.DEV) {
-    console.error(...args);
+    console.log('[realtime]', ...args);
   }
 }
 
-function safeParseMessage<T>(message: IMessage): T | null {
-  if (!message.body) {
-    return null;
+function warnDev(...args: unknown[]) {
+  if (import.meta.env.DEV) {
+    console.warn('[realtime]', ...args);
   }
+}
 
+function parseRealtimeMessage(rawMessage: string): RealtimeEvent {
   try {
-    return JSON.parse(message.body) as T;
+    const parsed = JSON.parse(rawMessage) as unknown;
+
+    if (parsed && typeof parsed === 'object') {
+      const event = parsed as RealtimeEvent;
+      return {
+        ...event,
+        type: typeof event.type === 'string' ? event.type : 'MESSAGE',
+      };
+    }
+
+    return {
+      type: 'MESSAGE',
+      payload: parsed,
+      timestamp: new Date().toISOString(),
+    };
   } catch {
-    logDevError('WebSocket payload invalido:', message.body);
-    return null;
+    return {
+      type: 'MESSAGE',
+      payload: rawMessage,
+      timestamp: new Date().toISOString(),
+    };
   }
 }
 
-export function createRealtimeClient(options: RealtimeClientOptions = {}): Client {
-  const token = getAccessToken();
-  const connectHeaders: Record<string, string> = {};
-
-  if (token) {
-    connectHeaders.Authorization = `Bearer ${token}`;
+export function connectRealtime(options: RealtimeConnectionOptions = {}): () => void {
+  if (!WS_URL) {
+    warnDev('VITE_WS_URL não definido. Conexão realtime desativada.');
+    return () => undefined;
   }
 
-  const client = new Client({
-    brokerURL: WS_URL,
-    reconnectDelay: 5000,
-    connectHeaders,
-    debug: import.meta.env.DEV ? message => console.debug('[STOMP]', message) : () => undefined,
-    onConnect: () => {
-      options.onConnect?.();
-    },
-    onDisconnect: () => {
-      options.onDisconnect?.();
-    },
-    onStompError: frame => {
-      logDevError('STOMP error:', frame.headers['message'], frame.body);
-    },
-    onWebSocketError: event => {
-      logDevError('WebSocket error:', event);
-    },
-  });
+  let socket: WebSocket | null = null;
+  let reconnectTimeoutId: number | null = null;
+  let isCleanupRequested = false;
+  let reconnectAttempts = 0;
 
-  return client;
-}
-
-export function subscribeToSupplierOrders(
-  supplierId: string,
-  callback: (payload: OrderNotificationPayload) => void,
-) {
-  const client = createRealtimeClient();
-
-  client.onConnect = () => {
-    client.subscribe(`/topic/orders/${supplierId}`, message => {
-      const payload = safeParseMessage<OrderNotificationPayload>(message);
-      if (payload) {
-        callback(payload);
-      }
-    });
+  const clearReconnectTimer = () => {
+    if (reconnectTimeoutId !== null) {
+      window.clearTimeout(reconnectTimeoutId);
+      reconnectTimeoutId = null;
+    }
   };
 
-  client.activate();
+  const scheduleReconnect = () => {
+    if (isCleanupRequested || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      return;
+    }
 
-  return () => {
-    void client.deactivate();
-  };
-}
+    const delay = BASE_RECONNECT_DELAY_MS * (2 ** reconnectAttempts);
+    reconnectAttempts += 1;
 
-export function subscribeToOrderTracking(
-  orderId: string,
-  callback: (payload: TrackingLocationPayload) => void,
-) {
-  const client = createRealtimeClient();
+    logDev(`Tentando reconectar (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) em ${delay}ms.`);
 
-  client.onConnect = () => {
-    client.subscribe(`/topic/tracking/${orderId}`, message => {
-      const payload = safeParseMessage<TrackingLocationPayload>(message);
-      if (payload) {
-        callback(payload);
-      }
-    });
+    reconnectTimeoutId = window.setTimeout(() => {
+      reconnectTimeoutId = null;
+      openConnection();
+    }, delay);
   };
 
-  client.activate();
+  const openConnection = () => {
+    if (isCleanupRequested) {
+      return;
+    }
 
-  return () => {
-    void client.deactivate();
-  };
-}
+    try {
+      // If backend requires auth by query param or subprotocol, configure here.
+      // Example: new WebSocket(`${WS_URL}?token=...`) or new WebSocket(WS_URL, ['protocol']).
+      socket = new WebSocket(WS_URL);
+    } catch (error) {
+      warnDev('Falha ao inicializar WebSocket.', error);
+      scheduleReconnect();
+      return;
+    }
 
-export function subscribeToRouteLocation(
-  routeId: string,
-  callback: (payload: RouteLocationPayload) => void,
-) {
-  const client = createRealtimeClient();
-
-  client.onConnect = () => {
-    client.subscribe(`/topic/routes/${routeId}/location`, message => {
-      const payload = safeParseMessage<RouteLocationPayload>(message);
-      if (payload) {
-        callback(payload);
-      }
-    });
-  };
-
-  client.activate();
-
-  return () => {
-    void client.deactivate();
-  };
-}
-
-export async function publishTrackingLocation(payload: TrackingLocationPayload): Promise<void> {
-  await new Promise<void>(resolve => {
-    const client = createRealtimeClient();
-
-    client.onConnect = () => {
-      try {
-        client.publish({
-          destination: '/app/tracking/location',
-          body: JSON.stringify(payload),
-        });
-      } catch (error) {
-        logDevError('Falha ao publicar tracking location:', error);
-      } finally {
-        void client.deactivate();
-        resolve();
-      }
+    socket.onopen = () => {
+      reconnectAttempts = 0;
+      logDev('Conexão estabelecida.');
+      options.onOpen?.();
     };
 
-    client.activate();
-  });
+    socket.onmessage = (messageEvent: MessageEvent<string>) => {
+      const event = parseRealtimeMessage(messageEvent.data);
+      options.onEvent?.(event);
+    };
+
+    socket.onerror = (event: Event) => {
+      warnDev('Erro na conexão WebSocket.', event);
+      options.onError?.(event);
+    };
+
+    socket.onclose = () => {
+      options.onClose?.();
+      socket = null;
+
+      if (isCleanupRequested) {
+        logDev('Conexão encerrada por cleanup.');
+        return;
+      }
+
+      warnDev('Conexão encerrada inesperadamente.');
+      scheduleReconnect();
+    };
+  };
+
+  openConnection();
+
+  return () => {
+    isCleanupRequested = true;
+    clearReconnectTimer();
+
+    if (socket && socket.readyState !== WebSocket.CLOSED) {
+      socket.close();
+    }
+
+    socket = null;
+  };
 }

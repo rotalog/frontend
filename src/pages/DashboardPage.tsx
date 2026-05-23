@@ -4,12 +4,14 @@ import { OrderTable } from '../Components/OrderTable';
 import { StockManagementSection } from '../Components/StockManagementSection';
 import { KpiCard } from '../Components/KpiCard';
 import { NewOrderBanner } from '../Components/NewOrderBanner';
+import { SettingsProfileSection } from '../Components/SettingsProfileSection';
 import { mockOrders, mockStock } from '../data/mockData';
 import { ApiError } from '../services/api';
 import { arriveDeliveryPoint, failDeliveryPoint, sendDeliveryProof } from '../services/deliveryPoints';
 import { getInventory } from '../services/inventory';
 import { getOrders } from '../services/orders';
 import { getSupplierProducts } from '../services/products';
+import { getSupplierById, updateSupplier } from '../services/suppliers';
 import {
   getAcceptanceRateReport,
   getDashboardReport,
@@ -22,8 +24,9 @@ import {
   getSupplierRatingSummary,
   getSupplierReviews,
 } from '../services/reviews';
+import { connectRealtime } from '../services/realtime';
 import { completeRoute, generateRoute, getRoutePoints, getRoutes, getTodayRoutes, startRoute } from '../services/routes';
-import { getCurrentUser } from '../services/auth';
+import { getCurrentUser, type AuthenticatedUser } from '../services/auth';
 import type { ApiInventoryItem } from '../types/inventory';
 import type { ApiProduct } from '../types/products';
 import type { ApiDeliveryPoint, ApiRoute, GenerateRouteStop } from '../types/routes';
@@ -35,7 +38,9 @@ import type {
   SalesReport,
   TopProductReport,
 } from '../types/reports';
+import type { RealtimeEvent } from '../types/realtime';
 import type { RatingSummaryResponse, ReviewResponse } from '../types/reviews';
+import type { ApiSupplier } from '../types/suppliers';
 import {
   calculateFallbackKpis,
   getNumberValue,
@@ -77,6 +82,14 @@ type DashboardStockRow = {
   product: string;
   available: number;
   reserved: number;
+};
+
+type SupplierDraft = {
+  companyName: string;
+  companyEmail: string;
+  address: string;
+  phone: string;
+  cnpj: string;
 };
 
 const EMPTY_RATING_SUMMARY: RatingSummaryResponse = {
@@ -223,6 +236,12 @@ function getDeliveryPointStatusLabel(status?: string): string {
   return map[normalized] ?? status;
 }
 
+function logRealtimeDev(...args: unknown[]) {
+  if (import.meta.env.DEV) {
+    console.log('[dashboard-realtime]', ...args);
+  }
+}
+
 export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: DashboardPageProps) {
   const [activeSection, setActiveSection] = useState<DashboardSection>('VISAO_GERAL');
   const [activeOverviewTab, setActiveOverviewTab] = useState<OverviewTab>('VISAO_GERAL');
@@ -256,7 +275,22 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   const [reportExportMessage, setReportExportMessage] = useState('');
   const [reportExportError, setReportExportError] = useState('');
   const [hasLoadedReports, setHasLoadedReports] = useState(false);
+  const [currentUserProfile, setCurrentUserProfile] = useState<AuthenticatedUser | null>(null);
   const [supplierId, setSupplierId] = useState('');
+  const [supplierProfile, setSupplierProfile] = useState<ApiSupplier | null>(null);
+  const [isLoadingSupplierProfile, setIsLoadingSupplierProfile] = useState(false);
+  const [supplierProfileError, setSupplierProfileError] = useState('');
+  const [supplierSaveMessage, setSupplierSaveMessage] = useState('');
+  const [supplierSaveError, setSupplierSaveError] = useState('');
+  const [isSavingSupplier, setIsSavingSupplier] = useState(false);
+  const [, setIsRealtimeConnected] = useState(false);
+  const [supplierDraft, setSupplierDraft] = useState<SupplierDraft>({
+    companyName: '',
+    companyEmail: '',
+    address: '',
+    phone: '',
+    cnpj: '',
+  });
   const [isLoadingSupplierReviews, setIsLoadingSupplierReviews] = useState(false);
   const [supplierReviewsError, setSupplierReviewsError] = useState('');
   const [supplierReviews, setSupplierReviews] = useState<ReviewResponse[]>([]);
@@ -301,6 +335,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         return;
       }
 
+      setCurrentUserProfile(currentUserResult.status === 'fulfilled' ? currentUserResult.value : null);
       setSupplierId(typeof currentSupplierId === 'string' ? currentSupplierId : '');
 
       let hasSuccess = false;
@@ -392,6 +427,181 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const syncOrdersFromRealtime = async () => {
+      try {
+        const latestOrders = await getOrders();
+        if (!active) {
+          return;
+        }
+
+        setApiOrders(latestOrders);
+        setOverviewOrders(latestOrders.map(mapApiOrderToLegacyOrder));
+      } catch (error) {
+        logRealtimeDev('Falha ao sincronizar pedidos por evento realtime.', error);
+      }
+    };
+
+    const syncInventoryFromRealtime = async () => {
+      try {
+        const latestInventory = await getInventory();
+        if (!active) {
+          return;
+        }
+
+        setApiInventory(latestInventory);
+
+        if (isValidApiId(supplierId)) {
+          try {
+            const products = await getSupplierProducts(supplierId);
+            if (!active) {
+              return;
+            }
+
+            setStock(mapProductAndInventoryToStock(products, latestInventory));
+          } catch (error) {
+            logRealtimeDev('Falha ao sincronizar produtos junto ao estoque realtime.', error);
+            setStock(latestInventory.map(mapApiInventoryToLegacyStock));
+          }
+          return;
+        }
+
+        setStock(latestInventory.map(mapApiInventoryToLegacyStock));
+      } catch (error) {
+        logRealtimeDev('Falha ao sincronizar estoque por evento realtime.', error);
+      }
+    };
+
+    const syncRoutesFromRealtime = async () => {
+      try {
+        const [todayRoutesResult, routesResult] = await Promise.allSettled([
+          getTodayRoutes(),
+          getRoutes(),
+        ]);
+
+        if (!active) {
+          return;
+        }
+
+        if (todayRoutesResult.status === 'fulfilled') {
+          setTodayRoute(todayRoutesResult.value);
+          setSelectedRouteId(current => current || todayRoutesResult.value[0]?.id || '');
+        }
+
+        if (routesResult.status === 'fulfilled') {
+          setRouteHistory(routesResult.value);
+          setSelectedRouteId(current => current || routesResult.value[0]?.id || '');
+        }
+      } catch (error) {
+        logRealtimeDev('Falha ao sincronizar rotas por evento realtime.', error);
+      }
+    };
+
+    const disconnectRealtime = connectRealtime({
+      onOpen: () => {
+        setIsRealtimeConnected(true);
+        logRealtimeDev('Realtime conectado.');
+      },
+      onClose: () => {
+        setIsRealtimeConnected(false);
+        logRealtimeDev('Realtime desconectado.');
+      },
+      onError: (error) => {
+        setIsRealtimeConnected(false);
+        logRealtimeDev('Erro no realtime.', error);
+      },
+      onEvent: (event: RealtimeEvent) => {
+        const normalizedType = String(event.type ?? '').toUpperCase();
+
+        if (!normalizedType) {
+          return;
+        }
+
+        logRealtimeDev('Evento recebido:', normalizedType, event);
+
+        if (
+          normalizedType === 'ORDER_CREATED' ||
+          normalizedType === 'ORDER_UPDATED' ||
+          normalizedType === 'ORDER_STATUS_CHANGED'
+        ) {
+          void syncOrdersFromRealtime();
+          return;
+        }
+
+        if (normalizedType === 'INVENTORY_UPDATED') {
+          void syncInventoryFromRealtime();
+          return;
+        }
+
+        if (normalizedType === 'ROUTE_UPDATED' || normalizedType === 'DELIVERY_UPDATED') {
+          void syncRoutesFromRealtime();
+        }
+      },
+    });
+
+    return () => {
+      active = false;
+      disconnectRealtime();
+    };
+  }, [supplierId]);
+
+  useEffect(() => {
+    if (!isValidApiId(supplierId)) {
+      setSupplierProfile(null);
+      setSupplierProfileError('');
+      setSupplierDraft({
+        companyName: companyName || '',
+        companyEmail: currentUserProfile?.email ?? '',
+        address: '',
+        phone: '',
+        cnpj: '',
+      });
+      return;
+    }
+
+    let active = true;
+
+    const loadSupplierProfile = async () => {
+      setIsLoadingSupplierProfile(true);
+      setSupplierProfileError('');
+
+      try {
+        const supplier = await getSupplierById(supplierId);
+        if (!active) {
+          return;
+        }
+
+        setSupplierProfile(supplier);
+        setSupplierDraft({
+          companyName: typeof supplier.companyName === 'string' ? supplier.companyName : companyName,
+          companyEmail: typeof supplier.companyEmail === 'string' ? supplier.companyEmail : (currentUserProfile?.email ?? ''),
+          address: typeof supplier.address === 'string' ? supplier.address : '',
+          phone: typeof supplier.phone === 'string' ? supplier.phone : '',
+          cnpj: typeof supplier.cnpj === 'string' ? supplier.cnpj : '',
+        });
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        setSupplierProfile(null);
+        setSupplierProfileError('Não foi possível carregar os dados do fornecedor.');
+      } finally {
+        if (active) {
+          setIsLoadingSupplierProfile(false);
+        }
+      }
+    };
+
+    void loadSupplierProfile();
+
+    return () => {
+      active = false;
+    };
+  }, [companyName, currentUserProfile?.email, supplierId]);
 
   useEffect(() => {
     if (!usingMockFallback) {
@@ -776,6 +986,82 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       dateStyle: 'short',
       timeStyle: 'short',
     }).format(parsed);
+  };
+
+  const displayCompanyName = useMemo(() => {
+    if (typeof supplierProfile?.companyName === 'string' && supplierProfile.companyName.trim()) {
+      return supplierProfile.companyName;
+    }
+
+    if (companyName.trim()) {
+      return companyName;
+    }
+
+    if (typeof currentUserProfile?.companyName === 'string' && currentUserProfile.companyName.trim()) {
+      return currentUserProfile.companyName;
+    }
+
+    if (typeof currentUserProfile?.empresaNome === 'string' && currentUserProfile.empresaNome.trim()) {
+      return currentUserProfile.empresaNome;
+    }
+
+    if (typeof currentUserProfile?.name === 'string' && currentUserProfile.name.trim()) {
+      return currentUserProfile.name;
+    }
+
+    return 'Fornecedor';
+  }, [companyName, currentUserProfile, supplierProfile]);
+
+  const canEditSupplier = isValidApiId(supplierId) && supplierProfile !== null;
+  const handleSupplierDraftChange = (field: keyof SupplierDraft, value: string) => {
+    setSupplierDraft(current => ({
+      ...current,
+      [field]: value,
+    }));
+    setSupplierSaveMessage('');
+    setSupplierSaveError('');
+  };
+
+  const handleSaveSupplierProfile = async () => {
+    if (!canEditSupplier) {
+      setSupplierSaveError('Edição indisponível no momento.');
+      return;
+    }
+
+    setIsSavingSupplier(true);
+    setSupplierSaveError('');
+    setSupplierSaveMessage('');
+
+    try {
+      const payload = {
+        companyName: supplierDraft.companyName.trim(),
+        companyEmail: supplierDraft.companyEmail.trim(),
+        address: supplierDraft.address.trim(),
+        phone: supplierDraft.phone.trim(),
+        cnpj: supplierDraft.cnpj.trim(),
+      };
+
+      const updatedSupplier = await updateSupplier(supplierId, payload);
+      setSupplierProfile(updatedSupplier);
+      setSupplierDraft({
+        companyName: typeof updatedSupplier.companyName === 'string' ? updatedSupplier.companyName : payload.companyName,
+        companyEmail: typeof updatedSupplier.companyEmail === 'string' ? updatedSupplier.companyEmail : payload.companyEmail,
+        address: typeof updatedSupplier.address === 'string' ? updatedSupplier.address : payload.address,
+        phone: typeof updatedSupplier.phone === 'string' ? updatedSupplier.phone : payload.phone,
+        cnpj: typeof updatedSupplier.cnpj === 'string' ? updatedSupplier.cnpj : payload.cnpj,
+      });
+      setSupplierSaveMessage('Dados do fornecedor atualizados com sucesso.');
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) {
+        setSupplierSaveError('Você não tem permissão para atualizar o fornecedor.');
+      } else if (error instanceof ApiError && error.status === 404) {
+        setSupplierSaveError('Fornecedor não encontrado para atualização.');
+      } else {
+        setSupplierSaveError('Não foi possível salvar os dados do fornecedor.');
+      }
+    } finally {
+      setIsSavingSupplier(false);
+    }
   };
 
   const recentSupplierReviews = useMemo(() => {
@@ -1899,10 +2185,24 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
     if (activeSection === 'CONFIGURACOES') {
       return (
-        <div className="mt-8 bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-6">
-          <h2 className="text-lg font-semibold !text-white dark:!text-white light:!text-gray-900">Configurações da conta</h2>
-          <p className="text-sm text-gray-400 light:text-gray-600 mt-2">Em breve: notificações, integrações e preferências de operação.</p>
-        </div>
+        <SettingsProfileSection
+          theme={theme}
+          toggleTheme={toggleTheme}
+          onLogout={onLogout}
+          currentUser={currentUserProfile}
+          companyName={displayCompanyName}
+          supplierId={supplierId}
+          supplierProfile={supplierProfile}
+          isLoadingSupplierProfile={isLoadingSupplierProfile}
+          supplierProfileError={supplierProfileError}
+          supplierDraft={supplierDraft}
+          onSupplierDraftChange={handleSupplierDraftChange}
+          onSaveSupplier={handleSaveSupplierProfile}
+          isSavingSupplier={isSavingSupplier}
+          supplierSaveError={supplierSaveError}
+          supplierSaveMessage={supplierSaveMessage}
+          canEditSupplier={canEditSupplier}
+        />
       );
     }
 
@@ -1993,13 +2293,17 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
         {!isOverviewWorkspace && <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
           <h1 className="text-2xl font-bold !text-white dark:!text-white light:!text-gray-900">{headerTitle}</h1>
-          <div className="flex items-center gap-4 text-gray-400">
+          <button
+            type="button"
+            onClick={() => setActiveSection('CONFIGURACOES')}
+            className="flex items-center gap-4 text-left text-gray-400 transition-colors hover:text-gray-200 light:hover:text-gray-800"
+          >
             <div className="text-right">
               <p className="text-xs text-gray-500 light:text-gray-600">Perfil</p>
-              <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{companyName}</p>
+              <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{displayCompanyName}</p>
             </div>
             <div className="w-10 h-10 rounded-full bg-[#141414] border border-[#222222] light:bg-gray-200 light:border-gray-300" />
-          </div>
+          </button>
         </header>}
 
         {renderSectionContent()}

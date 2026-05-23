@@ -92,8 +92,11 @@ Resumo executivo:
 ## Como configurar .env
 
 Valores esperados:
-- VITE_API_URL=http://localhost:8080/api/v1
-- VITE_WS_URL=ws://localhost:8080/ws
+- VITE_API_URL=/api/v1
+- VITE_WS_URL=wss://api.rotalog.madebyhermes.com/ws
+
+Observacao:
+- Os valores anteriores com localhost:8080 ficam apenas como referencia legada para backend local e nao devem ser tratados como padrao atual do projeto.
 
 ## Observações sobre autenticação e token
 
