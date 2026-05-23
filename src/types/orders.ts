@@ -18,6 +18,8 @@ export interface Order {
   status: OrderStatus;
   dataDesejada: string;
   itens: Array<{ nome: string; quantidade: number; preco: number }>;
+  statusDisplay?: string;
+  deliveryAddress?: string;
 }
 
 export interface StockItem {
@@ -47,33 +49,37 @@ export interface StockMovement {
 
 export type ApiOrderStatus =
   | 'PENDING'
-  | 'RESERVED'
+  | 'ACCEPTED'
   | 'REJECTED'
   | 'CANCELLED'
-  | 'CANCELED'
   | 'PREPARING'
   | 'DISPATCHED'
+  | 'DELIVERED'
   | string;
 
 export interface ApiOrderItem {
   productId?: string;
   productName?: string;
+  name?: string;
   quantity: number;
   unitPrice?: number;
-  totalPrice?: number;
-  [key: string]: unknown;
+  price?: number;
+  total?: number;
 }
 
 export interface ApiOrder {
   id: string;
   status: ApiOrderStatus;
   totalAmount?: number;
-  customerName?: string;
-  customerId?: string;
-  supplierId?: string;
-  items?: ApiOrderItem[];
+  amount?: number;
+  value?: number;
   createdAt?: string;
   updatedAt?: string;
+  items?: ApiOrderItem[];
+  buyerName?: string;
+  customerName?: string;
+  customer?: unknown;
+  deliveryAddress?: string;
   [key: string]: unknown;
 }
 
@@ -95,18 +101,9 @@ export interface RejectOrderPayload {
   [key: string]: unknown;
 }
 
-export interface OrderTrackingEvent {
-  status: string;
-  description?: string;
-  createdAt?: string;
-  latitude?: number;
-  longitude?: number;
-  [key: string]: unknown;
-}
-
-export interface OrderTracking {
-  orderId: string;
-  currentStatus?: string;
-  events?: OrderTrackingEvent[];
+export interface OrderTrackingResponse {
+  orderId?: string;
+  status?: string;
+  events?: unknown[];
   [key: string]: unknown;
 }

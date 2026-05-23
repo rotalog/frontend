@@ -5,15 +5,17 @@ import { StockManagementSection } from '../Components/StockManagementSection';
 import { KpiCard } from '../Components/KpiCard';
 import { NewOrderBanner } from '../Components/NewOrderBanner';
 import { mockOrders, mockStock } from '../data/mockData';
+import { ApiError } from '../services/api';
+import { arriveDeliveryPoint, failDeliveryPoint, sendDeliveryProof } from '../services/deliveryPoints';
 import { getInventory } from '../services/inventory';
 import { getOrders } from '../services/orders';
 import { getSupplierProducts } from '../services/products';
 import { getDashboardReport } from '../services/reports';
-import { getTodayRoute } from '../services/routes';
+import { completeRoute, generateRoute, getRoutePoints, getRoutes, getTodayRoutes, startRoute } from '../services/routes';
 import { getCurrentUser } from '../services/auth';
 import type { ApiInventoryItem } from '../types/inventory';
 import type { ApiProduct } from '../types/products';
-import type { ApiRoute } from '../types/routes';
+import type { ApiDeliveryPoint, ApiRoute, GenerateRouteStop } from '../types/routes';
 import type { Order, OrderStatus, StockMovement } from '../types/orders';
 import type { ApiOrder } from '../types/orders';
 import type { DashboardReport } from '../types/reports';
@@ -161,6 +163,42 @@ const flowTimeByStatus: Partial<Record<OrderStatus, string>> = {
   ENTREGUE: 'Entregue 07:55',
 };
 
+function isValidApiId(id?: string): boolean {
+  return typeof id === 'string' && id.length >= 20 && !id.startsWith('mock-');
+}
+
+function getRouteStatusLabel(status?: string): string {
+  if (!status) {
+    return 'Planejada';
+  }
+
+  const normalized = status.toUpperCase();
+  const map: Record<string, string> = {
+    PLANNED: 'Planejada',
+    IN_PROGRESS: 'Em andamento',
+    COMPLETED: 'Concluída',
+    CANCELLED: 'Cancelada',
+  };
+
+  return map[normalized] ?? status;
+}
+
+function getDeliveryPointStatusLabel(status?: string): string {
+  if (!status) {
+    return 'Pendente';
+  }
+
+  const normalized = status.toUpperCase();
+  const map: Record<string, string> = {
+    PENDING: 'Pendente',
+    ARRIVED: 'Chegada registrada',
+    DELIVERED: 'Entregue',
+    FAILED: 'Falha na entrega',
+  };
+
+  return map[normalized] ?? status;
+}
+
 export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: DashboardPageProps) {
   const [activeSection, setActiveSection] = useState<DashboardSection>('VISAO_GERAL');
   const [activeOverviewTab, setActiveOverviewTab] = useState<OverviewTab>('VISAO_GERAL');
@@ -174,14 +212,21 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   const [apiOrders, setApiOrders] = useState<ApiOrder[]>([]);
   const [apiInventory, setApiInventory] = useState<ApiInventoryItem[]>([]);
   const [todayRoute, setTodayRoute] = useState<ApiRoute[]>([]);
+  const [selectedDriverId] = useState('');
+  const [routeHistory, setRouteHistory] = useState<ApiRoute[]>([]);
+  const [selectedRouteId, setSelectedRouteId] = useState('');
+  const [selectedRoutePoints, setSelectedRoutePoints] = useState<ApiDeliveryPoint[]>([]);
+  const [isSyncingRouteAction, setIsSyncingRouteAction] = useState('');
+  const [routeActionFeedback, setRouteActionFeedback] = useState('');
+  const [routeActionError, setRouteActionError] = useState('');
   const [usingMockFallback, setUsingMockFallback] = useState(false);
   const [inventoryNotInitialized, setInventoryNotInitialized] = useState(false);
   const [apiWarning, setApiWarning] = useState('');
 
   // Raw API responses — consumed by derived state below and available for future tabs.
   const hasApiData = useMemo(
-    () => apiOrders.length > 0 || apiInventory.length > 0 || Boolean(dashboardReport) || todayRoute.length > 0,
-    [apiOrders, apiInventory, dashboardReport, todayRoute],
+    () => apiOrders.length > 0 || apiInventory.length > 0 || Boolean(dashboardReport) || todayRoute.length > 0 || routeHistory.length > 0,
+    [apiOrders, apiInventory, dashboardReport, todayRoute, routeHistory],
   );
   void hasApiData;
 
@@ -194,11 +239,12 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       setApiWarning('');
       setInventoryNotInitialized(false);
 
-      const [reportResult, ordersResult, inventoryResult, routeResult, currentUserResult] = await Promise.allSettled([
+      const [reportResult, ordersResult, inventoryResult, todayRouteResult, routeHistoryResult, currentUserResult] = await Promise.allSettled([
         getDashboardReport(),
         getOrders(),
         getInventory(),
-        getTodayRoute(),
+        getTodayRoutes(),
+        getRoutes(),
         getCurrentUser(),
       ]);
 
@@ -227,7 +273,10 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         hasSuccess = true;
       } else {
         setApiOrders([]);
-        setOverviewOrders([]);
+        setOverviewOrders(mockOrders);
+        setApiWarning('Exibindo dados demonstrativos.');
+        hasMockFallback = true;
+        hasSuccess = true;
       }
 
       if (inventoryResult.status === 'fulfilled') {
@@ -254,14 +303,27 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         }
       }
 
-      if (routeResult.status === 'fulfilled') {
-        setTodayRoute(routeResult.value);
+      if (todayRouteResult.status === 'fulfilled') {
+        setTodayRoute(todayRouteResult.value);
+        if (!selectedRouteId && todayRouteResult.value[0]?.id) {
+          setSelectedRouteId(todayRouteResult.value[0].id);
+        }
         hasSuccess = true;
       } else {
         setTodayRoute([]);
       }
 
-      const hasPartialError = [reportResult, ordersResult, inventoryResult, routeResult, productsResult]
+      if (routeHistoryResult.status === 'fulfilled') {
+        setRouteHistory(routeHistoryResult.value);
+        if (!selectedRouteId && routeHistoryResult.value[0]?.id) {
+          setSelectedRouteId(routeHistoryResult.value[0].id);
+        }
+        hasSuccess = true;
+      } else {
+        setRouteHistory([]);
+      }
+
+      const hasPartialError = [reportResult, ordersResult, inventoryResult, todayRouteResult, routeHistoryResult, productsResult]
         .some(result => result.status === 'rejected');
 
       if (!hasSuccess) {
@@ -270,7 +332,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
       if (!hasSuccess) {
         setDashboardError('Não foi possível carregar os dados do painel.');
-      } else if (hasPartialError) {
+      } else if (hasPartialError && !hasMockFallback) {
         setApiWarning('Algumas informações ainda não estão disponíveis.');
       }
 
@@ -513,9 +575,255 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     ));
   }, [overviewOrders]);
 
+  const routeGenerationContext = useMemo(() => {
+    const stops: GenerateRouteStop[] = [];
+    let missingCoordinatesCount = 0;
+
+    for (const order of deliveryOrders) {
+      const source = order as unknown as Record<string, unknown>;
+      const latitudeCandidate = source.latitude ?? source.lat ?? source.deliveryLatitude;
+      const longitudeCandidate = source.longitude ?? source.lng ?? source.deliveryLongitude;
+      const latitude = typeof latitudeCandidate === 'number' ? latitudeCandidate : Number(latitudeCandidate);
+      const longitude = typeof longitudeCandidate === 'number' ? longitudeCandidate : Number(longitudeCandidate);
+
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !isValidApiId(order.id)) {
+        missingCoordinatesCount += 1;
+        continue;
+      }
+
+      stops.push({
+        orderId: order.id,
+        latitude,
+        longitude,
+      });
+    }
+
+    return {
+      stops,
+      missingCoordinatesCount,
+    };
+  }, [deliveryOrders]);
+
+  const canGenerateRoute = selectedDriverId.trim().length > 0 && routeGenerationContext.stops.length > 0;
+
   const completedDeliveries = useMemo(() => {
     return deliveryOrders.filter(order => order.status === 'ENTREGUE').length;
   }, [deliveryOrders]);
+
+  const refreshRoutesData = async () => {
+    const [todayRoutesResult, routesResult] = await Promise.allSettled([
+      getTodayRoutes(),
+      getRoutes(),
+    ]);
+
+    if (todayRoutesResult.status === 'fulfilled') {
+      setTodayRoute(todayRoutesResult.value);
+      if (!selectedRouteId && todayRoutesResult.value[0]?.id) {
+        setSelectedRouteId(todayRoutesResult.value[0].id);
+      }
+    }
+
+    if (routesResult.status === 'fulfilled') {
+      setRouteHistory(routesResult.value);
+      if (!selectedRouteId && routesResult.value[0]?.id) {
+        setSelectedRouteId(routesResult.value[0].id);
+      }
+    }
+  };
+
+  const setRouteErrorFromApi = (error: unknown) => {
+    if (error instanceof ApiError && error.status === 403) {
+      setRouteActionError('Você não tem permissão para executar esta ação.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status === 404) {
+      setRouteActionError('Registro não encontrado no backend.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status === 409) {
+      setRouteActionError('Esta ação não pode ser executada no status atual.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status >= 500) {
+      setRouteActionError('Erro interno ao atualizar rota/entrega. Tente novamente em instantes.');
+      return;
+    }
+
+    setRouteActionError('Erro ao executar ação de rota/entrega.');
+  };
+
+  const handleGenerateRoute = async () => {
+    if (!canGenerateRoute) {
+      setRouteActionError('Para gerar uma rota, selecione um entregador e ao menos uma entrega com localização.');
+      return;
+    }
+
+    setIsSyncingRouteAction('generate');
+    setRouteActionError('');
+
+    try {
+      const createdRoute = await generateRoute({
+        driverId: selectedDriverId,
+        stops: routeGenerationContext.stops,
+      });
+      setRouteActionFeedback('Rota gerada com sucesso.');
+      setTodayRoute(current => [createdRoute, ...current.filter(route => route.id !== createdRoute.id)]);
+      setRouteHistory(current => [createdRoute, ...current.filter(route => route.id !== createdRoute.id)]);
+      setSelectedRouteId(createdRoute.id);
+      await refreshRoutesData();
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  const handleStartRoute = async (routeId?: string) => {
+    if (!isValidApiId(routeId)) {
+      setRouteActionError('Registro sem ID real: ação simulada localmente.');
+      return;
+    }
+
+    const validRouteId = routeId as string;
+
+    setIsSyncingRouteAction(`start:${validRouteId}`);
+    setRouteActionError('');
+
+    try {
+      const updatedRoute = await startRoute(validRouteId);
+      setRouteActionFeedback('Rota iniciada com sucesso.');
+      setTodayRoute(current => current.map(route => route.id === validRouteId ? { ...route, ...updatedRoute } : route));
+      setRouteHistory(current => current.map(route => route.id === validRouteId ? { ...route, ...updatedRoute } : route));
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  const handleCompleteRoute = async (routeId?: string) => {
+    if (!isValidApiId(routeId)) {
+      setRouteActionError('Registro sem ID real: ação simulada localmente.');
+      return;
+    }
+
+    const validRouteId = routeId as string;
+
+    setIsSyncingRouteAction(`complete:${validRouteId}`);
+    setRouteActionError('');
+
+    try {
+      const updatedRoute = await completeRoute(validRouteId);
+      setRouteActionFeedback('Rota concluída com sucesso.');
+      setTodayRoute(current => current.map(route => route.id === validRouteId ? { ...route, ...updatedRoute } : route));
+      setRouteHistory(current => current.map(route => route.id === validRouteId ? { ...route, ...updatedRoute } : route));
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  const handleArrivePoint = async (pointId?: string) => {
+    if (!isValidApiId(pointId)) {
+      setRouteActionError('Registro sem ID real: ação simulada localmente.');
+      return;
+    }
+
+    const validPointId = pointId as string;
+
+    setIsSyncingRouteAction(`arrive:${validPointId}`);
+    setRouteActionError('');
+
+    try {
+      const updatedPoint = await arriveDeliveryPoint(validPointId, {});
+      setSelectedRoutePoints(current => current.map(point => point.id === validPointId ? { ...point, ...updatedPoint } : point));
+      setRouteActionFeedback('Chegada registrada com sucesso.');
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  const handleSendProof = async (pointId?: string) => {
+    if (!isValidApiId(pointId)) {
+      setRouteActionError('Registro sem ID real: ação simulada localmente.');
+      return;
+    }
+
+    const validPointId = pointId as string;
+
+    setIsSyncingRouteAction(`proof:${validPointId}`);
+    setRouteActionError('');
+
+    try {
+      const updatedPoint = await sendDeliveryProof(validPointId, { proof: 'Entrega confirmada no painel web' });
+      setSelectedRoutePoints(current => current.map(point => point.id === validPointId ? { ...point, ...updatedPoint } : point));
+      setRouteActionFeedback('Prova de entrega enviada com sucesso.');
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  const handleFailPoint = async (pointId?: string) => {
+    if (!isValidApiId(pointId)) {
+      setRouteActionError('Registro sem ID real: ação simulada localmente.');
+      return;
+    }
+
+    const validPointId = pointId as string;
+
+    setIsSyncingRouteAction(`fail:${validPointId}`);
+    setRouteActionError('');
+
+    try {
+      const updatedPoint = await failDeliveryPoint(validPointId, { reason: 'Falha registrada no painel web' });
+      setSelectedRoutePoints(current => current.map(point => point.id === validPointId ? { ...point, ...updatedPoint } : point));
+      setRouteActionFeedback('Falha de entrega registrada com sucesso.');
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedRouteId || !isValidApiId(selectedRouteId)) {
+      setSelectedRoutePoints([]);
+      return;
+    }
+
+    let active = true;
+
+    const loadRoutePoints = async () => {
+      try {
+        const points = await getRoutePoints(selectedRouteId);
+        if (!active) {
+          return;
+        }
+
+        setSelectedRoutePoints(points);
+      } catch {
+        if (!active) {
+          return;
+        }
+
+        setSelectedRoutePoints([]);
+      }
+    };
+
+    void loadRoutePoints();
+
+    return () => {
+      active = false;
+    };
+  }, [selectedRouteId]);
 
   const renderOverviewContent = () => {
     if (activeOverviewTab === 'PEDIDOS') {
@@ -879,21 +1187,185 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     }
 
     if (activeSection === 'ENTREGAS') {
+      const todayPrimaryRoute = todayRoute[0];
+      const selectedRoute = routeHistory.find(route => route.id === selectedRouteId)
+        ?? todayRoute.find(route => route.id === selectedRouteId)
+        ?? todayPrimaryRoute;
+
       return (
-        <div className="mt-8 bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5">
-          <h2 className="text-lg font-semibold !text-white dark:!text-white light:!text-gray-900 mb-4">Lista de entregas</h2>
-          <div className="space-y-2">
-            {deliveriesToday.map(order => (
-              <div key={order.id} className="rounded-lg border border-[#2a2a2a] light:border-gray-200 p-3 flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{order.id} - {order.cliente}</p>
-                  <p className="text-xs text-gray-500">Entrega prevista: {order.dataDesejada}</p>
+        <div className="mt-8 space-y-5">
+          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+              <h2 className="text-lg font-semibold !text-white dark:!text-white light:!text-gray-900">Rota do dia</h2>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleGenerateRoute();
+                }}
+                disabled={isSyncingRouteAction === 'generate' || !canGenerateRoute}
+                className="rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 px-3 py-2 text-xs font-semibold hover:bg-[#00ff66]/25 disabled:opacity-60 transition-colors"
+              >
+                Gerar rota
+              </button>
+            </div>
+
+            <p className="mb-3 text-xs text-gray-500 light:text-gray-600">
+              A geração de rota depende de um entregador e de entregas com coordenadas.
+            </p>
+
+            {routeGenerationContext.missingCoordinatesCount > 0 && (
+              <p className="mb-3 text-xs text-amber-300 light:text-amber-700">
+                Algumas entregas não possuem coordenadas e não podem entrar na rota.
+              </p>
+            )}
+
+            {!todayPrimaryRoute && (
+              <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma rota planejada para hoje.</p>
+            )}
+
+            {todayPrimaryRoute && (
+              <div className="rounded-lg border border-[#2a2a2a] light:border-gray-200 p-3 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm text-white dark:text-white light:text-gray-900 font-medium">{todayPrimaryRoute.id}</p>
+                  <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-400 light:bg-violet-100 light:text-violet-700">
+                    {getRouteStatusLabel(typeof todayPrimaryRoute.status === 'string' ? todayPrimaryRoute.status : undefined)}
+                  </span>
                 </div>
-                <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-400 light:bg-violet-100 light:text-violet-700">
-                  {order.status === 'ENTREGUE' ? 'Entregue' : 'Em rota'}
-                </span>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleStartRoute(todayPrimaryRoute.id);
+                    }}
+                    disabled={isSyncingRouteAction === `start:${todayPrimaryRoute.id}`}
+                    className="rounded-md border border-[#2a2a2a] light:border-gray-200 px-3 py-1.5 text-xs text-gray-300 light:text-gray-700 hover:bg-[#202020] light:hover:bg-gray-100 disabled:opacity-60 transition-colors"
+                  >
+                    Iniciar rota
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleCompleteRoute(todayPrimaryRoute.id);
+                    }}
+                    disabled={isSyncingRouteAction === `complete:${todayPrimaryRoute.id}`}
+                    className="rounded-md border border-[#2a2a2a] light:border-gray-200 px-3 py-1.5 text-xs text-gray-300 light:text-gray-700 hover:bg-[#202020] light:hover:bg-gray-100 disabled:opacity-60 transition-colors"
+                  >
+                    Concluir rota
+                  </button>
+                </div>
               </div>
-            ))}
+            )}
+
+            {routeActionFeedback && (
+              <p className="mt-3 text-xs text-[#00ff66] light:text-green-700">{routeActionFeedback}</p>
+            )}
+
+            {routeActionError && (
+              <p className="mt-2 text-xs text-amber-300 light:text-amber-700">{routeActionError}</p>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5">
+              <h3 className="text-base font-semibold !text-white dark:!text-white light:!text-gray-900 mb-4">Histórico de rotas</h3>
+              <div className="space-y-2 max-h-[260px] overflow-y-auto">
+                {routeHistory.map(route => (
+                  <button
+                    key={route.id}
+                    type="button"
+                    onClick={() => setSelectedRouteId(route.id)}
+                    className={`w-full text-left rounded-lg border p-3 transition-colors ${
+                      selectedRouteId === route.id
+                        ? 'border-[#00ff66]/40 bg-[#00ff66]/10 light:bg-green-100 light:border-green-300'
+                        : 'border-[#2a2a2a] light:border-gray-200 hover:bg-[#1a1a1a] light:hover:bg-gray-50'
+                    }`}
+                  >
+                    <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{route.id}</p>
+                    <p className="text-xs text-gray-500 light:text-gray-600 mt-1">
+                      {getRouteStatusLabel(typeof route.status === 'string' ? route.status : undefined)}
+                    </p>
+                  </button>
+                ))}
+
+                {routeHistory.length === 0 && (
+                  <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma rota registrada.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5">
+              <h3 className="text-base font-semibold !text-white dark:!text-white light:!text-gray-900 mb-4">Pontos de entrega</h3>
+
+              {!selectedRoute && (
+                <p className="text-sm text-gray-500 light:text-gray-600">Selecione uma rota para visualizar os pontos.</p>
+              )}
+
+              {selectedRoute && selectedRoutePoints.length === 0 && (
+                <p className="text-sm text-gray-500 light:text-gray-600">Nenhum ponto de entrega encontrado para esta rota.</p>
+              )}
+
+              <div className="space-y-2 max-h-[320px] overflow-y-auto">
+                {selectedRoutePoints.map(point => (
+                  <div key={point.id} className="rounded-lg border border-[#2a2a2a] light:border-gray-200 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm text-white dark:text-white light:text-gray-900">{point.address || point.id}</p>
+                      <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-400 light:bg-violet-100 light:text-violet-700">
+                        {getDeliveryPointStatusLabel(typeof point.status === 'string' ? point.status : undefined)}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleArrivePoint(point.id);
+                        }}
+                        disabled={isSyncingRouteAction === `arrive:${point.id}`}
+                        className="rounded-md border border-[#2a2a2a] light:border-gray-200 px-2.5 py-1 text-xs text-gray-300 light:text-gray-700 hover:bg-[#202020] light:hover:bg-gray-100 disabled:opacity-60 transition-colors"
+                      >
+                        Registrar chegada
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleSendProof(point.id);
+                        }}
+                        disabled={isSyncingRouteAction === `proof:${point.id}`}
+                        className="rounded-md border border-[#2a2a2a] light:border-gray-200 px-2.5 py-1 text-xs text-gray-300 light:text-gray-700 hover:bg-[#202020] light:hover:bg-gray-100 disabled:opacity-60 transition-colors"
+                      >
+                        Enviar prova
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleFailPoint(point.id);
+                        }}
+                        disabled={isSyncingRouteAction === `fail:${point.id}`}
+                        className="rounded-md border border-[#2a2a2a] light:border-gray-200 px-2.5 py-1 text-xs text-gray-300 light:text-gray-700 hover:bg-[#202020] light:hover:bg-gray-100 disabled:opacity-60 transition-colors"
+                      >
+                        Registrar falha
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5">
+            <h2 className="text-lg font-semibold !text-white dark:!text-white light:!text-gray-900 mb-4">Lista de entregas</h2>
+            <div className="space-y-2">
+              {deliveriesToday.map(order => (
+                <div key={order.id} className="rounded-lg border border-[#2a2a2a] light:border-gray-200 p-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{order.id} - {order.cliente}</p>
+                    <p className="text-xs text-gray-500">Entrega prevista: {order.dataDesejada}</p>
+                  </div>
+                  <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-400 light:bg-violet-100 light:text-violet-700">
+                    {order.status === 'ENTREGUE' ? 'Entregue' : 'Em rota'}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       );

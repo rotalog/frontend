@@ -1,16 +1,17 @@
 import { api, ApiError } from './api';
-import type { ApiRoute, GenerateRoutePayload, RoutePoint } from '../types/routes';
+import type { ApiDeliveryPoint, ApiRoute, GenerateRoutePayload } from '../types/routes';
 
-export async function generateRoute(payload: GenerateRoutePayload) {
+export async function generateRoute(payload: GenerateRoutePayload): Promise<ApiRoute> {
   return api<ApiRoute>('/routes/generate', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
-export async function getTodayRoute(): Promise<ApiRoute[]> {
+export async function getTodayRoutes(): Promise<ApiRoute[]> {
   try {
-    return await api<ApiRoute[]>('/routes/today', { method: 'GET' });
+    const response = await api<ApiRoute[] | ApiRoute>('/routes/today', { method: 'GET' });
+    return Array.isArray(response) ? response : [response];
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
       return [];
@@ -20,26 +21,45 @@ export async function getTodayRoute(): Promise<ApiRoute[]> {
   }
 }
 
-export async function getRoutes() {
-  return api<ApiRoute[]>('/routes', {
-    method: 'GET',
-  });
+export async function getRoutes(): Promise<ApiRoute[]> {
+  try {
+    return await api<ApiRoute[]>('/routes', {
+      method: 'GET',
+    });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return [];
+    }
+
+    throw error;
+  }
 }
 
-export async function startRoute(id: string) {
-  return api<ApiRoute>(`/routes/${id}/start`, {
+export async function startRoute(routeId: string): Promise<ApiRoute> {
+  return api<ApiRoute>(`/routes/${routeId}/start`, {
     method: 'PUT',
   });
 }
 
-export async function completeRoute(id: string) {
-  return api<ApiRoute>(`/routes/${id}/complete`, {
+export async function completeRoute(routeId: string): Promise<ApiRoute> {
+  return api<ApiRoute>(`/routes/${routeId}/complete`, {
     method: 'PUT',
   });
 }
 
-export async function getRoutePoints(id: string) {
-  return api<RoutePoint[]>(`/routes/${id}/points`, {
-    method: 'GET',
-  });
+export async function getRoutePoints(routeId: string): Promise<ApiDeliveryPoint[]> {
+  try {
+    return await api<ApiDeliveryPoint[]>(`/routes/${routeId}/points`, {
+      method: 'GET',
+    });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return [];
+    }
+
+    throw error;
+  }
 }
+
+// Compatibility alias used by existing imports.
+export const getTodayRoute = getTodayRoutes;

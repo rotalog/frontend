@@ -1,45 +1,30 @@
 import { api } from './api';
+import type {
+  ApiDeliveryPoint,
+  DeliveryArrivePayload,
+  DeliveryFailPayload,
+  DeliveryProofPayload,
+} from '../types/routes';
 
-export interface DeliveryPointProofPayload {
-  proof?: string;
-  note?: string;
-  imageUrl?: string;
-  [key: string]: unknown;
-}
-
-export interface DeliveryPointArrivePayload {
-  driverLatitude: number;
-  driverLongitude: number;
-}
-
-export interface DeliveryPointFailPayload {
-  reason: string;
-}
-
-export async function arriveDeliveryPoint(id: string, payload: DeliveryPointArrivePayload) {
-  return api<{ id: string; status?: string; [key: string]: unknown }>(`/delivery-points/${id}/arrive`, {
+export async function arriveDeliveryPoint(pointId: string, payload?: DeliveryArrivePayload): Promise<ApiDeliveryPoint> {
+  return api<ApiDeliveryPoint>(`/delivery-points/${pointId}/arrive`, {
     method: 'PUT',
+    body: JSON.stringify({
+      driverLatitude: payload?.driverLatitude,
+      driverLongitude: payload?.driverLongitude,
+    }),
+  });
+}
+
+export async function sendDeliveryProof(pointId: string, payload: DeliveryProofPayload): Promise<ApiDeliveryPoint> {
+  return api<ApiDeliveryPoint>(`/delivery-points/${pointId}/proof`, {
+    method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
-export async function sendDeliveryProof(id: string, payload: DeliveryPointProofPayload | string) {
-  const proof = typeof payload === 'string'
-    ? payload
-    : payload.proof ?? payload.note ?? payload.imageUrl ?? '';
-
-  if (!proof.trim()) {
-    throw new Error('Comprovante de entrega invalido.');
-  }
-
-  return api<{ id: string; status?: string; [key: string]: unknown }>(`/delivery-points/${id}/proof`, {
-    method: 'POST',
-    body: JSON.stringify({ proof }),
-  });
-}
-
-export async function failDeliveryPoint(id: string, payload: DeliveryPointFailPayload) {
-  return api<{ id: string; status?: string; [key: string]: unknown }>(`/delivery-points/${id}/fail`, {
+export async function failDeliveryPoint(pointId: string, payload: DeliveryFailPayload): Promise<ApiDeliveryPoint> {
+  return api<ApiDeliveryPoint>(`/delivery-points/${pointId}/fail`, {
     method: 'PUT',
     body: JSON.stringify({
       reason: payload.reason,

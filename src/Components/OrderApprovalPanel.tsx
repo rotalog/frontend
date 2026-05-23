@@ -6,6 +6,7 @@ interface OrderApprovalPanelProps {
   order: Order;
   statusLabel: Record<OrderStatus, string>;
   statusStyle: Record<OrderStatus, string>;
+  statusLabelOverride?: string;
   onAccept: () => void;
   onReject: (reason: string) => void;
   onConfirmPayment: () => void;
@@ -42,6 +43,7 @@ export function OrderApprovalPanel({
   order,
   statusLabel,
   statusStyle,
+  statusLabelOverride,
   onAccept,
   onReject,
   onConfirmPayment,
@@ -93,7 +95,7 @@ export function OrderApprovalPanel({
       <div className="flex items-center justify-between mb-4 gap-2">
         <h3 className="text-base font-semibold text-white dark:text-white light:text-gray-900">Painel de detalhes</h3>
         <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${statusStyle[order.status]}`}>
-          {statusLabel[order.status]}
+          {statusLabelOverride ?? statusLabel[order.status]}
         </span>
       </div>
 
