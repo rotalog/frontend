@@ -1,4 +1,4 @@
-import { api } from './api';
+import { api, ApiError } from './api';
 import type { ApiRoute, GenerateRoutePayload, RoutePoint } from '../types/routes';
 
 export async function generateRoute(payload: GenerateRoutePayload) {
@@ -8,10 +8,16 @@ export async function generateRoute(payload: GenerateRoutePayload) {
   });
 }
 
-export async function getTodayRoute() {
-  return api<ApiRoute[]>('/routes/today', {
-    method: 'GET',
-  });
+export async function getTodayRoute(): Promise<ApiRoute[]> {
+  try {
+    return await api<ApiRoute[]>('/routes/today', { method: 'GET' });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return [];
+    }
+
+    throw error;
+  }
 }
 
 export async function getRoutes() {

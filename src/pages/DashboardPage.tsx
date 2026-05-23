@@ -2,12 +2,17 @@ import { useEffect, useMemo, useState } from 'react';
 import { Sidebar, type DashboardSection } from '../Components/Sidebar';
 import { OrderTable } from '../Components/OrderTable';
 import { StockManagementSection } from '../Components/StockManagementSection';
+import { KpiCard } from '../Components/KpiCard';
+import { NewOrderBanner } from '../Components/NewOrderBanner';
 import { mockOrders, mockStock } from '../data/mockData';
 import { getInventory } from '../services/inventory';
 import { getOrders } from '../services/orders';
+import { getSupplierProducts } from '../services/products';
 import { getDashboardReport } from '../services/reports';
 import { getTodayRoute } from '../services/routes';
+import { getCurrentUser } from '../services/auth';
 import type { ApiInventoryItem } from '../types/inventory';
+import type { ApiProduct } from '../types/products';
 import type { ApiRoute } from '../types/routes';
 import type { Order, OrderStatus, StockMovement } from '../types/orders';
 import type { ApiOrder } from '../types/orders';
@@ -53,6 +58,60 @@ type DashboardStockRow = {
   available: number;
   reserved: number;
 };
+
+function mapProductAndInventoryToStock(products: ApiProduct[], inventory: ApiInventoryItem[]) {
+  const inventoryByProductId = new Map<string, ApiInventoryItem>();
+  for (const item of inventory) {
+    if (typeof item.productId === 'string' && item.productId.trim()) {
+      inventoryByProductId.set(item.productId, item);
+    }
+  }
+
+  const merged = products.map(product => {
+    const inventoryItem = inventoryByProductId.get(product.id);
+    const totalQuantity = inventoryItem
+      ? (typeof inventoryItem.quantity === 'number'
+        ? inventoryItem.quantity
+        : typeof inventoryItem.totalQuantity === 'number'
+          ? inventoryItem.totalQuantity
+          : 0)
+      : 0;
+    const reservedQuantity = inventoryItem
+      ? (typeof inventoryItem.reservedQuantity === 'number' ? inventoryItem.reservedQuantity : 0)
+      : 0;
+    const availableQuantity = inventoryItem
+      ? (typeof inventoryItem.availableQuantity === 'number'
+        ? inventoryItem.availableQuantity
+        : Math.max(0, totalQuantity - reservedQuantity))
+      : 0;
+
+    return {
+      id: product.id,
+      productId: product.id,
+      supplierId: product.supplierId,
+      codigo: product.id,
+      name: product.name,
+      produto: product.name,
+      minStockLevel: product.minStockLevel,
+      imageUrl: product.imageUrl,
+      fotoUrl: product.imageUrl,
+      total: totalQuantity,
+      reservado: reservedQuantity,
+      totalQuantity,
+      reservedQuantity,
+      availableQuantity,
+      badges: [],
+    };
+  });
+
+  // Keep inventory-only rows visible if backend inventory has orphan items not present in /suppliers/{id}/products.
+  const mergedIds = new Set(merged.map(item => item.productId));
+  const inventoryOnly = inventory
+    .filter(item => typeof item.productId === 'string' && !mergedIds.has(item.productId))
+    .map(item => mapApiInventoryToLegacyStock(item));
+
+  return [...merged, ...inventoryOnly];
+}
 
 const orderFlowColumns: OrderFlowColumn[] = [
   {
@@ -118,6 +177,15 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   const [apiInventory, setApiInventory] = useState<ApiInventoryItem[]>([]);
   const [todayRoute, setTodayRoute] = useState<ApiRoute[]>([]);
   const [usingMockFallback, setUsingMockFallback] = useState(false);
+  const [inventoryNotInitialized, setInventoryNotInitialized] = useState(false);
+  const [apiWarning, setApiWarning] = useState('');
+
+  // Raw API responses — consumed by derived state below and available for future tabs.
+  const hasApiData = useMemo(
+    () => apiOrders.length > 0 || apiInventory.length > 0 || Boolean(dashboardReport) || todayRoute.length > 0,
+    [apiOrders, apiInventory, dashboardReport, todayRoute],
+  );
+  void hasApiData;
 
   useEffect(() => {
     let active = true;
@@ -125,13 +193,21 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     const loadDashboardData = async () => {
       setIsLoadingDashboard(true);
       setDashboardError('');
+      setApiWarning('');
+      setInventoryNotInitialized(false);
 
-      const [reportResult, ordersResult, inventoryResult, routeResult] = await Promise.allSettled([
+      const [reportResult, ordersResult, inventoryResult, routeResult, currentUserResult] = await Promise.allSettled([
         getDashboardReport(),
         getOrders(),
         getInventory(),
         getTodayRoute(),
+        getCurrentUser(),
       ]);
+
+      const supplierId = currentUserResult.status === 'fulfilled' ? currentUserResult.value.supplierId : undefined;
+      const productsResult = supplierId
+        ? await Promise.allSettled([getSupplierProducts(supplierId)]).then(results => results[0])
+        : await Promise.resolve({ status: 'fulfilled', value: [] } as PromiseFulfilledResult<ApiProduct[]>);
 
       if (!active) {
         return;
@@ -153,18 +229,27 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         hasSuccess = true;
       } else {
         setApiOrders([]);
-        setOverviewOrders(mockOrders);
-        hasMockFallback = true;
+        setOverviewOrders([]);
       }
 
       if (inventoryResult.status === 'fulfilled') {
         setApiInventory(inventoryResult.value);
-        setStock(inventoryResult.value.map(mapApiInventoryToLegacyStock));
+        if (productsResult.status === 'fulfilled') {
+          setStock(mapProductAndInventoryToStock(productsResult.value, inventoryResult.value));
+        } else {
+          setStock(inventoryResult.value.map(mapApiInventoryToLegacyStock));
+        }
         hasSuccess = true;
       } else {
         setApiInventory([]);
-        setStock(mockStock);
-        hasMockFallback = true;
+        if (productsResult.status === 'fulfilled') {
+          setStock(mapProductAndInventoryToStock(productsResult.value, []));
+          setInventoryNotInitialized(productsResult.value.length > 0);
+          hasSuccess = hasSuccess || productsResult.value.length > 0;
+        } else {
+          setStock([]);
+          setInventoryNotInitialized(true);
+        }
       }
 
       if (routeResult.status === 'fulfilled') {
@@ -174,17 +259,17 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         setTodayRoute([]);
       }
 
-      const hasPartialError = [reportResult, ordersResult, inventoryResult, routeResult]
+      const hasPartialError = [reportResult, ordersResult, inventoryResult, routeResult, productsResult]
         .some(result => result.status === 'rejected');
 
       if (!hasSuccess) {
-        hasMockFallback = true;
-        setOverviewOrders(mockOrders);
-        setStock(mockStock);
+        hasMockFallback = false;
       }
 
-      if (!hasSuccess || hasPartialError) {
-        setDashboardError('Nao foi possivel carregar todos os dados da API. Alguns dados demonstrativos estao sendo exibidos.');
+      if (!hasSuccess) {
+        setDashboardError('Não foi possível carregar os dados do painel.');
+      } else if (hasPartialError) {
+        setApiWarning('Algumas informações ainda não estão disponíveis.');
       }
 
       setUsingMockFallback(hasMockFallback);
@@ -252,12 +337,16 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
   const dashboardKpis = useMemo(() => {
     const source = dashboardReport as Record<string, unknown> | null;
-    const revenueToday = getNumberValue(source, ['totalRevenue', 'faturamentoTotal', 'revenueToday'], fallbackKpis.revenueToday);
-    const totalOrders = getNumberValue(source, ['totalOrders', 'pedidosTotal'], fallbackKpis.totalOrders);
-    const pendingOrders = getNumberValue(source, ['pendingOrders', 'pedidosPendentes'], fallbackKpis.pendingOrders);
+    const revenueToday = getNumberValue(source, ['billedToday', 'totalRevenue', 'faturamentoTotal', 'revenueToday'], fallbackKpis.revenueToday);
+    const totalOrders = getNumberValue(source, ['openOrders', 'totalOrders', 'pedidosTotal'], fallbackKpis.totalOrders);
+    const pendingOrders = getNumberValue(source, ['newOrders', 'pendingOrders', 'pedidosPendentes'], fallbackKpis.pendingOrders);
     const preparingOrders = getNumberValue(source, ['preparingOrders', 'pedidosEmSeparacao'], fallbackKpis.preparingOrders);
     const acceptanceRate = getNumberValue(source, ['acceptanceRate', 'taxaAceite'], fallbackKpis.acceptanceRate);
     const lowStockCount = getNumberValue(source, ['lowStockCount', 'estoqueBaixo'], fallbackKpis.lowStockCount);
+    const availableUnits = getNumberValue(source, ['availableUnits'], fallbackKpis.totalOrders);
+    const confirmedPayments = getNumberValue(source, ['confirmedPayments'], 0);
+    void availableUnits;
+    void confirmedPayments;
 
     const rawTopProducts = source?.topProducts;
     const mappedTopProducts = Array.isArray(rawTopProducts)
@@ -496,22 +585,11 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     if (activeOverviewTab === 'ESTOQUE') {
       return (
         <section className="space-y-6">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-5 py-4">
-            <div className="flex items-center gap-3">
-              <span className="h-2.5 w-2.5 rounded-full bg-[#00ff66]" />
-              <p className="text-sm font-semibold leading-6 text-[#00ff66]">
-                {stockNotice}
-                {dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setActiveOverviewTab('PEDIDOS')}
-              className="w-fit rounded-md bg-[#00ff66] px-4 py-2 text-xs font-bold text-black transition-colors hover:bg-[#22ff7a]"
-            >
-              Ver pedido →
-            </button>
-          </div>
+          <NewOrderBanner
+            message={`${stockNotice}${dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}`}
+            onViewOrder={() => setActiveOverviewTab('PEDIDOS')}
+            className="px-5 py-4 gap-4"
+          />
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
             <div className="rounded-xl border border-[#222222] bg-[#151515] p-4 light:border-gray-200 light:bg-white">
@@ -641,22 +719,10 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     if (activeOverviewTab === 'ENTREGAS') {
       return (
         <section className="space-y-4">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span className="h-2.5 w-2.5 rounded-full bg-[#00ff66]" />
-              <p className="text-sm font-semibold text-[#00ff66]">
-                {stockNotice}
-                {dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setActiveOverviewTab('PEDIDOS')}
-              className="w-fit rounded-md bg-[#00ff66] px-4 py-2 text-xs font-bold text-black transition-colors hover:bg-[#22ff7a]"
-            >
-              Ver pedido →
-            </button>
-          </div>
+          <NewOrderBanner
+            message={`${stockNotice}${dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}`}
+            onViewOrder={() => setActiveOverviewTab('PEDIDOS')}
+          />
 
           <div className="rounded-xl border border-[#222222] bg-[#151515] p-4 light:border-gray-200 light:bg-white">
             <div className="mb-4 flex items-center justify-between">
@@ -718,22 +784,10 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     if (activeOverviewTab === 'RELATORIOS') {
       return (
         <section className="space-y-4">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span className="h-2.5 w-2.5 rounded-full bg-[#00ff66]" />
-              <p className="text-sm font-semibold text-[#00ff66]">
-                {stockNotice}
-                {dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setActiveOverviewTab('PEDIDOS')}
-              className="w-fit rounded-md bg-[#00ff66] px-4 py-2 text-xs font-bold text-black transition-colors hover:bg-[#22ff7a]"
-            >
-              Ver pedido →
-            </button>
-          </div>
+          <NewOrderBanner
+            message={`${stockNotice}${dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}`}
+            onViewOrder={() => setActiveOverviewTab('PEDIDOS')}
+          />
 
           <div className="rounded-xl border border-[#222222] bg-[#151515] p-6 md:p-8 light:border-gray-200 light:bg-white">
             <div className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -792,10 +846,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
           { label: 'Saindo Hoje', value: String(dashboardKpis.deliveriesInProgress) },
           { label: 'Faturado (Mês)', value: formatCurrency(dashboardKpis.revenueToday) },
         ].map(card => (
-          <div key={card.label} className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
-            <p className="text-gray-500 light:text-gray-400 text-sm">{card.label}</p>
-            <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900 mt-1">{card.value}</h3>
-          </div>
+          <KpiCard key={card.label} label={card.label} value={card.value} />
         ))}
       </div>
     );
@@ -849,22 +900,10 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     if (activeSection === 'RELATORIOS') {
       return (
         <div className="mt-8 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
-            <p className="text-gray-500 light:text-gray-400 text-sm">Pedidos Aceitos</p>
-            <h3 className="text-2xl font-bold text-emerald-400 light:text-emerald-700 mt-1">{reportSummary.accepted}</h3>
-          </div>
-          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
-            <p className="text-gray-500 light:text-gray-400 text-sm">Pedidos Recusados</p>
-            <h3 className="text-2xl font-bold text-rose-400 light:text-rose-700 mt-1">{reportSummary.rejected}</h3>
-          </div>
-          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
-            <p className="text-gray-500 light:text-gray-400 text-sm">Em Separação</p>
-            <h3 className="text-2xl font-bold text-amber-400 light:text-amber-700 mt-1">{reportSummary.preparing}</h3>
-          </div>
-          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
-            <p className="text-gray-500 light:text-gray-400 text-sm">Faturamento</p>
-            <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900 mt-1">{formatCurrency(reportSummary.revenue)}</h3>
-          </div>
+          <KpiCard label="Pedidos Aceitos" value={reportSummary.accepted} valueClassName="text-emerald-400 light:text-emerald-700" />
+          <KpiCard label="Pedidos Recusados" value={reportSummary.rejected} valueClassName="text-rose-400 light:text-rose-700" />
+          <KpiCard label="Em Separação" value={reportSummary.preparing} valueClassName="text-amber-400 light:text-amber-700" />
+          <KpiCard label="Faturamento" value={formatCurrency(reportSummary.revenue)} />
         </div>
       );
     }
@@ -888,7 +927,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     activeOverviewTab === 'RELATORIOS'
   );
 
-  const hasApiData = apiOrders.length > 0 || apiInventory.length > 0 || Boolean(dashboardReport) || todayRoute.length > 0;
+
 
   return (
     <div className="flex w-full min-h-screen bg-[#050505] dark:bg-[#050505] light:bg-gray-50 transition-colors duration-300">
@@ -909,8 +948,19 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
         {!isLoadingDashboard && dashboardError && (
           <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 light:bg-amber-100 light:text-amber-700">
-            Nao foi possivel carregar todos os dados da API. Alguns dados demonstrativos estao sendo exibidos.
-            {hasApiData ? ' Dados da API foram carregados parcialmente.' : ''}
+            {dashboardError}
+          </div>
+        )}
+
+        {!isLoadingDashboard && !dashboardError && apiWarning && (
+          <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 light:bg-amber-100 light:text-amber-700">
+            {apiWarning}
+          </div>
+        )}
+
+        {!isLoadingDashboard && inventoryNotInitialized && (
+          <div className="mb-4 rounded-xl border border-[#222222] light:border-gray-200 bg-[#0d0d0d] dark:bg-[#0d0d0d] light:bg-white px-4 py-3 text-xs text-gray-400 light:text-gray-600">
+            Estoque ainda não inicializado.
           </div>
         )}
 

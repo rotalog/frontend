@@ -1,24 +1,19 @@
 export interface ApiProduct {
   id: string;
-  supplierId?: string;
+  supplierId: string;
   name: string;
-  sku?: string;
-  description?: string;
-  price?: number;
-  active?: boolean;
-  createdAt?: string;
-  updatedAt?: string;
-  [key: string]: unknown;
+  minStockLevel: number;
+  imageUrl?: string;
 }
 
 export interface CreateProductPayload {
   name: string;
   minStockLevel: number;
-  [key: string]: unknown;
+  imageUrl?: string;
 }
 
 export interface UpdateProductPayload {
-  name: string;
-  minStockLevel: number;
-  [key: string]: unknown;
+  name?: string;
+  minStockLevel?: number;
+  imageUrl?: string;
 }

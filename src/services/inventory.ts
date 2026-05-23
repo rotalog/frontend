@@ -1,14 +1,20 @@
-import { api } from './api';
+import { api, ApiError } from './api';
 import type {
   ApiInventoryItem,
   InventoryMovement,
   UpdateInventoryPayload,
 } from '../types/inventory';
 
-export async function getInventory() {
-  return api<ApiInventoryItem[]>('/inventory', {
-    method: 'GET',
-  });
+export async function getInventory(): Promise<ApiInventoryItem[]> {
+  try {
+    return await api<ApiInventoryItem[]>('/inventory', { method: 'GET' });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return [];
+    }
+
+    throw error;
+  }
 }
 
 export async function updateInventory(productId: string, payload: UpdateInventoryPayload) {

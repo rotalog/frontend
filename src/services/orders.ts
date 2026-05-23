@@ -1,14 +1,20 @@
-import { api } from './api';
+import { api, ApiError } from './api';
 import type {
   ApiOrder,
   CreateOrderPayload,
   OrderTracking,
 } from '../types/orders';
 
-export async function getOrders() {
-  return api<ApiOrder[]>('/orders', {
-    method: 'GET',
-  });
+export async function getOrders(): Promise<ApiOrder[]> {
+  try {
+    return await api<ApiOrder[]>('/orders', { method: 'GET' });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return [];
+    }
+
+    throw error;
+  }
 }
 
 export async function getOrderById(id: string) {

@@ -15,6 +15,8 @@ export interface ApiRoute {
   date?: string;
   driverId?: string;
   vehicleId?: string;
+  supplierId?: string;
+  deliveryPoints?: unknown[];
   points?: RoutePoint[];
   createdAt?: string;
   updatedAt?: string;

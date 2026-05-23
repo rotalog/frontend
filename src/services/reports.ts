@@ -1,7 +1,8 @@
-import { api, API_URL } from './api';
+import { api, API_URL, ApiError } from './api';
 import type {
   AcceptanceRateReport,
   DashboardReport,
+  EmptyDashboardReport,
   ReportPeriod,
   SalesReportItem,
   SalesReportParams,
@@ -9,10 +10,28 @@ import type {
   TopProductsParams,
 } from '../types/reports';
 
-export async function getDashboardReport() {
-  return api<DashboardReport>('/reports/dashboard', {
-    method: 'GET',
-  });
+const EMPTY_DASHBOARD: EmptyDashboardReport = {
+  openOrders: 0,
+  availableUnits: 0,
+  confirmedPayments: 0,
+  newOrders: 0,
+  preparingOrders: 0,
+  billedToday: 0,
+  acceptanceRate: 0,
+  lowStockProducts: [],
+  topProducts: [],
+};
+
+export async function getDashboardReport(): Promise<DashboardReport> {
+  try {
+    return await api<DashboardReport>('/reports/dashboard', { method: 'GET' });
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      return { ...EMPTY_DASHBOARD };
+    }
+
+    throw error;
+  }
 }
 
 export async function getSalesReport(params: SalesReportParams = {}) {

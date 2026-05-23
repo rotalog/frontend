@@ -5,7 +5,30 @@ export interface DashboardReport {
   totalRevenue?: number;
   pendingOrders?: number;
   deliveredOrders?: number;
+  // Fields returned by the real backend endpoint
+  openOrders?: number;
+  availableUnits?: number;
+  confirmedPayments?: number;
+  newOrders?: number;
+  preparingOrders?: number;
+  billedToday?: number;
+  acceptanceRate?: number;
+  lowStockProducts?: unknown[];
+  topProducts?: unknown[];
   [key: string]: unknown;
+}
+
+/** Shape guaranteed when the backend returns 404 (dashboard not yet populated). */
+export interface EmptyDashboardReport {
+  openOrders: number;
+  availableUnits: number;
+  confirmedPayments: number;
+  newOrders: number;
+  preparingOrders: number;
+  billedToday: number;
+  acceptanceRate: number;
+  lowStockProducts: unknown[];
+  topProducts: unknown[];
 }
 
 export interface SalesReportParams {
