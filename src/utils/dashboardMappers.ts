@@ -125,7 +125,7 @@ export function mapApiOrderToLegacyOrder(apiOrder: ApiOrder): Order {
 }
 
 export function mapApiInventoryToLegacyStock(apiInventory: ApiInventoryItem): StockItem {
-  const source = apiInventory as Record<string, unknown>;
+  const source = apiInventory as unknown as Record<string, unknown>;
   const productName = toString(source.productName ?? source.name ?? source.produto, 'Produto');
   const photoUrl = toString(source.photoUrl ?? source.fotoUrl);
 

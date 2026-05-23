@@ -70,11 +70,9 @@ function mapProductAndInventoryToStock(products: ApiProduct[], inventory: ApiInv
   const merged = products.map(product => {
     const inventoryItem = inventoryByProductId.get(product.id);
     const totalQuantity = inventoryItem
-      ? (typeof inventoryItem.quantity === 'number'
-        ? inventoryItem.quantity
-        : typeof inventoryItem.totalQuantity === 'number'
-          ? inventoryItem.totalQuantity
-          : 0)
+      ? (typeof inventoryItem.totalQuantity === 'number'
+        ? inventoryItem.totalQuantity
+        : 0)
       : 0;
     const reservedQuantity = inventoryItem
       ? (typeof inventoryItem.reservedQuantity === 'number' ? inventoryItem.reservedQuantity : 0)
@@ -236,6 +234,10 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         setApiInventory(inventoryResult.value);
         if (productsResult.status === 'fulfilled') {
           setStock(mapProductAndInventoryToStock(productsResult.value, inventoryResult.value));
+          if (productsResult.value.length > 0 && inventoryResult.value.length === 0) {
+            setApiWarning('Produtos carregados. Estoque ainda não inicializado para alguns itens.');
+            setInventoryNotInitialized(true);
+          }
         } else {
           setStock(inventoryResult.value.map(mapApiInventoryToLegacyStock));
         }

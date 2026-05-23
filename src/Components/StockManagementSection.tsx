@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { ApiError } from '../services/api';
+import { getInventoryMovements, updateInventory } from '../services/inventory';
 import { createProduct, deleteProduct, updateProduct } from '../services/products';
 import type { StockItem, StockMovement, StockMovementType } from '../types/orders';
+import type { StockMovementResponse } from '../types/inventory';
 
 interface StockManagementSectionProps {
   stock: StockItem[];
@@ -22,6 +24,7 @@ type ProductEditState = {
 type StockIdentity = StockItem & {
   productId?: string;
   id?: string;
+  inventoryId?: string;
   supplierId?: string;
   minStockLevel?: number;
   imageUrl?: string;
@@ -48,6 +51,14 @@ const movementTypeClass: Record<StockMovementType, string> = {
   RELEASE: 'bg-amber-500/15 text-amber-400 light:bg-amber-100 light:text-amber-700',
   EXIT: 'bg-rose-500/15 text-rose-400 light:bg-rose-100 light:text-rose-700',
 };
+
+function normalizeMovementType(value: string): StockMovementType {
+  if (value === 'ENTRY' || value === 'RESERVATION' || value === 'RELEASE' || value === 'EXIT') {
+    return value;
+  }
+
+  return 'ENTRY';
+}
 
 function toLocalDateTime(isoDate: string) {
   return new Intl.DateTimeFormat('pt-BR', {
@@ -81,6 +92,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
   const [isSyncingStock, setIsSyncingStock] = useState('');
   const [stockActionError, setStockActionError] = useState('');
   const [usingLocalStockFallback, setUsingLocalStockFallback] = useState(false);
+  const [apiMovements, setApiMovements] = useState<StockMovement[] | null>(null);
 
   const getStockProductId = (item: StockItem) => {
     const stockIdentity = item as StockIdentity;
@@ -95,6 +107,22 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
         ? stockIdentity.id
         : undefined;
   };
+
+  const getMinStockLevel = (item: StockItem) => {
+    const stockIdentity = item as StockIdentity;
+    return typeof stockIdentity.minStockLevel === 'number' && Number.isFinite(stockIdentity.minStockLevel)
+      ? stockIdentity.minStockLevel
+      : 0;
+  };
+
+  const mapMovement = (movement: StockMovementResponse, index: number): StockMovement => ({
+    id: typeof movement.id === 'string' && movement.id.trim() ? movement.id : `${Date.now()}-${index}`,
+    product: movement.productId,
+    type: normalizeMovementType(movement.movementType),
+    quantity: typeof movement.quantity === 'number' ? movement.quantity : 0,
+    source: movement.reason ?? movement.referenceId ?? 'Movimentacao de estoque',
+    createdAt: movement.createdAt,
+  });
 
   const updateStockItemLocally = (
     productId: string,
@@ -129,16 +157,121 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     setEditableRows(nextEditableRows);
   }, [stock]);
 
-  const handleSaveRow = (productName: string) => {
+  useEffect(() => {
+    if (!showMovementHistory) {
+      return;
+    }
+
+    let active = true;
+
+    const loadMovements = async () => {
+      try {
+        const response = await getInventoryMovements();
+        if (!active) {
+          return;
+        }
+
+        setApiMovements(response.map(mapMovement));
+      } catch {
+        if (!active) {
+          return;
+        }
+
+        setApiMovements([]);
+      }
+    };
+
+    void loadMovements();
+
+    return () => {
+      active = false;
+    };
+  }, [showMovementHistory]);
+
+  const handleSaveRow = async (productName: string) => {
+    const stockItem = stock.find(item => item.produto === productName);
+    const editable = editableRows[productName];
+
+    if (!stockItem || !editable) {
+      return;
+    }
+
+    const nextTotal = Number(editable.total);
+    if (!Number.isFinite(nextTotal) || nextTotal < 0) {
+      setRowErrors(current => ({ ...current, [productName]: 'Valores invalidos. Use numeros positivos.' }));
+      return;
+    }
+
+    const productId = getRealStockProductId(stockItem);
+    if (!isValidApiId(productId)) {
+      setRowErrors(current => ({ ...current, [productName]: '' }));
+      setStockActionError('Produto sem ID real: não foi possível ajustar estoque.');
+      return;
+    }
+
+    const currentTotal = stockItem.total;
+    const quantityToAdd = nextTotal - currentTotal;
+
+    if (quantityToAdd <= 0) {
+      setRowErrors(current => ({ ...current, [productName]: '' }));
+      setStockActionError('O backend atual permite apenas entrada de estoque. Para reduzir ou definir total menor, será necessário endpoint específico.');
+      return;
+    }
+
+    setIsSyncingStock(`save-row:${productId}`);
+    setStockActionError('');
     setRowErrors(current => ({ ...current, [productName]: '' }));
-    setStockActionError('Atualização de estoque será configurada na próxima etapa.');
+
+    try {
+      const inventory = await updateInventory(productId, {
+        quantity: quantityToAdd,
+        reason: 'Entrada manual no painel web',
+      });
+
+      updateStockItemLocally(productId, {
+        inventoryId: inventory.inventoryId,
+        total: inventory.totalQuantity,
+        reservado: inventory.reservedQuantity,
+        totalQuantity: inventory.totalQuantity,
+        reservedQuantity: inventory.reservedQuantity,
+        availableQuantity: inventory.availableQuantity,
+        badges: inventory.badges,
+      });
+
+      setImportFeedback('Estoque atualizado com sucesso.');
+
+      if (showMovementHistory) {
+        const refreshedMovements = await getInventoryMovements();
+        setApiMovements(refreshedMovements.map(mapMovement));
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) {
+        setStockActionError('Você não tem permissão para ajustar o estoque deste produto.');
+      } else if (error instanceof ApiError && error.status === 404) {
+        setStockActionError('Produto não encontrado no backend ou estoque ainda não inicializado. Alteração não salva.');
+      } else if (error instanceof ApiError && error.status >= 500) {
+        setStockActionError('Erro interno ao ajustar estoque. Tente novamente em instantes.');
+      } else {
+        setStockActionError(getApiErrorMessage(error));
+      }
+
+      setEditableRows(current => ({
+        ...current,
+        [productName]: {
+          total: String(currentTotal),
+          reserved: String(stockItem.reservado),
+        },
+      }));
+    } finally {
+      setIsSyncingStock('');
+    }
   };
 
   const handleImportCsvDisabled = () => {
     setStockActionError('Importação CSV será configurada na próxima etapa.');
   };
 
-  const effectiveMovements = movements;
+  const effectiveMovements = apiMovements ?? movements;
 
   const filteredMovements = useMemo(() => {
     return effectiveMovements
@@ -163,7 +296,8 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
   const filteredStock = stock.filter(item => {
     const available = item.total - item.reservado;
-    const isLowStock = available <= 20;
+    const minStockLevel = getMinStockLevel(item);
+    const isLowStock = minStockLevel > 0 && available <= minStockLevel;
 
     if (showOnlyLowStock && !isLowStock) {
       return false;
@@ -531,7 +665,8 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
             <tbody>
               {filteredStock.map(item => {
                 const available = item.total - item.reservado;
-                const isLowStock = available <= 20;
+                const minStockLevel = getMinStockLevel(item);
+                const isLowStock = minStockLevel > 0 && available <= minStockLevel;
                 const rowEdit = editableRows[item.produto] ?? { total: String(item.total), reserved: String(item.reservado) };
                 const rowSyncKey = `save-row:${String(getStockProductId(item))}`;
 
@@ -569,17 +704,8 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                         type="number"
                         min={0}
                         value={rowEdit.reserved}
-                        onChange={event => {
-                          const value = event.target.value;
-                          setEditableRows(current => ({
-                            ...current,
-                            [item.produto]: {
-                              total: current[item.produto]?.total ?? String(item.total),
-                              reserved: value,
-                            },
-                          }));
-                        }}
-                        className="w-24 rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-1 text-xs text-white dark:text-white light:text-gray-900"
+                        readOnly
+                        className="w-24 rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-100 border border-[#2a2a2a] light:border-gray-300 px-2 py-1 text-xs text-white dark:text-white light:text-gray-700 cursor-not-allowed"
                       />
                     </td>
                     <td className={`px-5 py-4 text-sm ${isLowStock ? 'bg-amber-500/20 dark:bg-amber-500/20 light:bg-amber-100' : ''}`}>
@@ -602,7 +728,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                           disabled={isSyncingStock === rowSyncKey}
                           className="text-xs px-2.5 py-1 rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 hover:bg-[#00ff66]/25 transition-colors disabled:opacity-60"
                         >
-                          Salvar
+                          Adicionar estoque
                         </button>
                         <button
                           type="button"
@@ -657,19 +783,20 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
             <div className="max-h-[400px] overflow-y-auto p-4 space-y-2 bg-[#0a0a0a] dark:bg-[#0a0a0a] light:bg-gray-50">
               {filteredMovements.length === 0 && (
-                <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma movimentacao para os filtros selecionados.</p>
+                <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma movimentação registrada.</p>
               )}
 
               {filteredMovements.map(movement => (
                 <div key={movement.id} className="rounded-lg border border-[#2a2a2a] light:border-gray-200 p-3">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm text-white dark:text-white light:text-gray-900">{movement.product}</p>
+                    <p className="text-sm text-white dark:text-white light:text-gray-900">Produto: {movement.product}</p>
                     <span className={`text-xs px-2 py-1 rounded-full ${movementTypeClass[movement.type]}`}>
                       {movementTypeLabels[movement.type]}
                     </span>
                   </div>
+                  <p className="text-xs text-gray-400 light:text-gray-600 mt-1">Tipo: {movement.type}</p>
                   <p className="text-xs text-gray-400 light:text-gray-600 mt-1">Quantidade: {movement.quantity}</p>
-                  <p className="text-xs text-gray-500 mt-1">{movement.source}</p>
+                  <p className="text-xs text-gray-500 mt-1">Motivo: {movement.source || '-'}</p>
                   <p className="text-[11px] text-gray-500 mt-1">{toLocalDateTime(movement.createdAt)}</p>
                 </div>
               ))}
