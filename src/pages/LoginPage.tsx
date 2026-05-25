@@ -1,9 +1,10 @@
-import { Moon, Sun } from 'lucide-react';
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import type { AuthResult } from '../services/auth';
 import { loginSupplier } from '../services/auth';
+import { ApiError } from '../services/api';
+import { ThemeToggleButton } from '../Components/ThemeToggleButton';
 
 interface LoginPageProps {
   theme: 'dark' | 'light';
@@ -56,7 +57,19 @@ export function LoginPage({ theme, toggleTheme, onLogin }: LoginPageProps) {
       onLogin(auth);
       navigate('/dashboard');
     } catch (error) {
-      setFormError(error instanceof Error ? error.message : 'Nao foi possivel autenticar.');
+      if (error instanceof ApiError) {
+        if (error.status === 401 || error.status === 403) {
+          setFormError('E-mail ou senha inválidos.');
+        } else if (error.status >= 500) {
+          setFormError('Erro interno no servidor. Tente novamente em instantes.');
+        } else {
+          setFormError(error.message || 'Não foi possível autenticar.');
+        }
+      } else if (error instanceof TypeError) {
+        setFormError('Não foi possível conectar à API.');
+      } else {
+        setFormError(error instanceof Error ? error.message : 'Não foi possível autenticar.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -64,14 +77,7 @@ export function LoginPage({ theme, toggleTheme, onLogin }: LoginPageProps) {
 
   return (
     <div className="min-h-screen w-full bg-[#050505] dark:bg-[#050505] light:bg-gray-50 transition-colors duration-300 flex items-center justify-center px-4">
-      <button
-        type="button"
-        onClick={toggleTheme}
-        className="absolute top-5 right-5 inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-[#2a2a2a] light:border-gray-300 bg-[#141414] dark:bg-[#141414] light:bg-white text-gray-300 light:text-gray-700 hover:text-[#00ff66] transition-colors"
-      >
-        {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-        <span className="text-sm font-medium">{theme === 'dark' ? 'Modo Claro' : 'Modo Escuro'}</span>
-      </button>
+      <ThemeToggleButton theme={theme} onClick={toggleTheme} className="absolute top-5 right-5" />
 
       <div className="w-full max-w-md bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-2xl p-6 md:p-8 shadow-card">
         <div className="mb-6">

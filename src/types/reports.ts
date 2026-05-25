@@ -1,43 +1,44 @@
-export type ReportPeriod = 'day' | 'week' | 'month' | 'year' | 'custom' | string;
-
 export interface DashboardReport {
-  totalOrders?: number;
-  totalRevenue?: number;
-  pendingOrders?: number;
-  deliveredOrders?: number;
+  openOrders?: number;
+  availableUnits?: number;
+  confirmedPayments?: number;
+  newOrders?: number;
+  preparingOrders?: number;
+  billedToday?: number;
+  acceptanceRate?: number;
+  lowStockProducts?: unknown[];
+  topProducts?: unknown[];
   [key: string]: unknown;
 }
 
-export interface SalesReportParams {
-  period?: ReportPeriod;
-  from?: string;
-  to?: string;
-}
-
-export interface SalesReportItem {
-  date?: string;
-  totalOrders?: number;
+export interface SalesReport {
   totalRevenue?: number;
+  totalOrders?: number;
+  averageTicket?: number;
+  period?: string;
+  series?: unknown[];
   [key: string]: unknown;
 }
 
-export interface TopProductsParams {
-  period?: ReportPeriod;
-  limit?: number;
-}
-
-export interface TopProductItem {
+export interface TopProductReport {
   productId?: string;
   productName?: string;
+  name?: string;
   quantitySold?: number;
-  revenue?: number;
+  totalRevenue?: number;
   [key: string]: unknown;
 }
 
 export interface AcceptanceRateReport {
-  period?: ReportPeriod;
-  accepted?: number;
-  rejected?: number;
   acceptanceRate?: number;
+  acceptedOrders?: number;
+  rejectedOrders?: number;
+  totalOrders?: number;
   [key: string]: unknown;
+}
+
+export interface ExportReportResult {
+  blob: Blob;
+  filename: string;
+  contentType: string;
 }

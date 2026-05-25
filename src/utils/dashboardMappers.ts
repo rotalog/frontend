@@ -11,11 +11,12 @@ const ORDER_STATUS_MAP: Record<string, OrderStatus> = {
   NOVO: 'PENDENTE',
   NEW: 'PENDENTE',
   ACEITO: 'ACEITO',
-  RESERVED: 'ACEITO',
   ACCEPTED: 'ACEITO',
+  RESERVED: 'ACEITO',
   REJEITADO: 'REJEITADO',
   REJECTED: 'REJEITADO',
   CANCELLED: 'CANCELADO',
+  CANCELED: 'CANCELADO',
   CANCELADO: 'CANCELADO',
   PAGAMENTO_CONFIRMADO: 'PAGAMENTO_CONFIRMADO',
   PAYMENT_CONFIRMED: 'PAGAMENTO_CONFIRMADO',
@@ -27,8 +28,18 @@ const ORDER_STATUS_MAP: Record<string, OrderStatus> = {
   DELIVERED: 'ENTREGUE',
   RECUSADO: 'RECUSADO',
   REJECTED_LEGACY: 'RECUSADO',
-  CANCELED: 'RECUSADO',
   CANCELLED_LEGACY: 'RECUSADO',
+};
+
+const STATUS_LABEL_MAP: Record<string, string> = {
+  PENDING: 'Pendente',
+  ACCEPTED: 'Aceito',
+  REJECTED: 'Rejeitado',
+  CANCELLED: 'Cancelado',
+  CANCELED: 'Cancelado',
+  PREPARING: 'Em preparo',
+  DISPATCHED: 'Despachado',
+  DELIVERED: 'Entregue',
 };
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -71,9 +82,22 @@ export function getNumberValue(source: GenericSource, possibleKeys: string[], fa
   return fallback;
 }
 
-function normalizeOrderStatus(rawStatus: unknown): OrderStatus {
+function normalizeOrderStatus(rawStatus: unknown): { status: OrderStatus; statusDisplay?: string } {
   const normalized = toString(rawStatus, 'PENDING').toUpperCase();
-  return ORDER_STATUS_MAP[normalized] ?? 'PENDENTE';
+  const mappedStatus = ORDER_STATUS_MAP[normalized];
+
+  if (mappedStatus) {
+    return {
+      status: mappedStatus,
+      statusDisplay: STATUS_LABEL_MAP[normalized],
+    };
+  }
+
+  const original = toString(rawStatus).trim();
+  return {
+    status: 'PENDENTE',
+    statusDisplay: original || undefined,
+  };
 }
 
 function isRejectedStatus(status: OrderStatus) {
@@ -100,6 +124,7 @@ function mapApiOrderItem(item: unknown) {
 export function mapApiOrderToLegacyOrder(apiOrder: ApiOrder): Order {
   const source = apiOrder as Record<string, unknown>;
   const id = toString(source.id, `PED-${Date.now()}`);
+  const normalizedStatus = normalizeOrderStatus(source.status);
   const itemsRaw = Array.isArray(source.items)
     ? source.items
     : Array.isArray(source.itens)
@@ -112,21 +137,23 @@ export function mapApiOrderToLegacyOrder(apiOrder: ApiOrder): Order {
   return {
     id,
     cliente: toString(
-      source.customerName ?? source.cliente ?? source.customer,
+      source.customerName ?? source.buyerName ?? source.cliente ?? source.customer,
       'Cliente',
     ),
-    valorTotal: getNumberValue(source, ['totalAmount', 'valorTotal', 'amount', 'total'], totalFromItems),
-    status: normalizeOrderStatus(source.status),
+    valorTotal: getNumberValue(source, ['totalAmount', 'amount', 'value', 'valorTotal', 'total'], totalFromItems),
+    status: normalizedStatus.status,
+    statusDisplay: normalizedStatus.statusDisplay,
     dataDesejada: toString(
       source.desiredDate ?? source.deliveryDate ?? source.createdAt,
       new Date().toISOString().slice(0, 10),
     ),
+    deliveryAddress: toString(source.deliveryAddress),
     itens,
   };
 }
 
 export function mapApiInventoryToLegacyStock(apiInventory: ApiInventoryItem): StockItem {
-  const source = apiInventory as Record<string, unknown>;
+  const source = apiInventory as unknown as Record<string, unknown>;
   const productName = toString(source.productName ?? source.name ?? source.produto, 'Produto');
   const photoUrl = toString(source.photoUrl ?? source.fotoUrl);
 

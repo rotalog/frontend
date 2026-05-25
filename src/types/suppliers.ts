@@ -27,7 +27,4 @@ export interface NearbySuppliersParams {
   latitude?: number;
   longitude?: number;
   radiusMeters?: number;
-  lat?: number;
-  lng?: number;
-  radius?: number;
 }

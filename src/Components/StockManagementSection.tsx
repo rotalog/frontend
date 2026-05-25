@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
-import type React from 'react';
-import { getInventoryMovements, importInventoryCsv, updateInventory } from '../services/inventory';
+import { ApiError } from '../services/api';
+import { getInventoryMovements, updateInventory } from '../services/inventory';
 import { createProduct, deleteProduct, updateProduct } from '../services/products';
 import type { StockItem, StockMovement, StockMovementType } from '../types/orders';
+import type { StockMovementResponse } from '../types/inventory';
 
 interface StockManagementSectionProps {
   stock: StockItem[];
@@ -14,18 +15,28 @@ interface StockManagementSectionProps {
 
 type EditableRowState = Record<string, { total: string; reserved: string }>;
 type ProductEditState = {
-  originalCodigo: string;
-  codigo: string;
+  productId: string;
   produto: string;
-  total: string;
-  reservado: string;
-  fotoUrl: string;
+  minStockLevel: string;
+  imageUrl: string;
 };
 
 type StockIdentity = StockItem & {
   productId?: string;
   id?: string;
+  inventoryId?: string;
+  supplierId?: string;
+  minStockLevel?: number;
+  imageUrl?: string;
+  totalQuantity?: number;
+  reservedQuantity?: number;
+  availableQuantity?: number;
+  badges?: string[];
 };
+
+function isValidApiId(id?: string): id is string {
+  return typeof id === 'string' && !id.startsWith('mock-') && id.length >= 20;
+}
 
 const movementTypeLabels: Record<StockMovementType, string> = {
   ENTRY: 'Entrada',
@@ -40,6 +51,14 @@ const movementTypeClass: Record<StockMovementType, string> = {
   RELEASE: 'bg-amber-500/15 text-amber-400 light:bg-amber-100 light:text-amber-700',
   EXIT: 'bg-rose-500/15 text-rose-400 light:bg-rose-100 light:text-rose-700',
 };
+
+function normalizeMovementType(value: string): StockMovementType {
+  if (value === 'ENTRY' || value === 'RESERVATION' || value === 'RELEASE' || value === 'EXIT') {
+    return value;
+  }
+
+  return 'ENTRY';
+}
 
 function toLocalDateTime(isoDate: string) {
   return new Intl.DateTimeFormat('pt-BR', {
@@ -56,28 +75,10 @@ function toInputDate(isoDate: string) {
   return `${year}-${month}-${day}`;
 }
 
-function normalizeMovementType(value: unknown): StockMovementType {
-  if (value === 'ENTRY' || value === 'RESERVATION' || value === 'RELEASE' || value === 'EXIT') {
-    return value;
-  }
-
-  return 'ENTRY';
-}
-
-async function fileToDataUrl(file: File) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(typeof reader.result === 'string' ? reader.result : '');
-    reader.onerror = () => reject(new Error('Falha ao carregar imagem.'));
-    reader.readAsDataURL(file);
-  });
-}
-
-export function StockManagementSection({ stock, setStock, movements, onRegisterMovements }: StockManagementSectionProps) {
+export function StockManagementSection({ stock, setStock, movements, onRegisterMovements: _onRegisterMovements }: StockManagementSectionProps) {
   const [editableRows, setEditableRows] = useState<EditableRowState>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [importFeedback, setImportFeedback] = useState('');
-  const [importError, setImportError] = useState('');
   const [movementTypeFilter, setMovementTypeFilter] = useState<'ALL' | StockMovementType>('ALL');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -85,7 +86,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
   const [showMovementHistory, setShowMovementHistory] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [showNewProductForm, setShowNewProductForm] = useState(false);
-  const [newProduct, setNewProduct] = useState({ codigo: '', produto: '', total: '0', reservado: '0', fotoUrl: '' });
+  const [newProduct, setNewProduct] = useState({ produto: '', minStockLevel: '0', imageUrl: '' });
   const [editingProduct, setEditingProduct] = useState<ProductEditState | null>(null);
   const [editModalError, setEditModalError] = useState('');
   const [isSyncingStock, setIsSyncingStock] = useState('');
@@ -95,29 +96,37 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
   const getStockProductId = (item: StockItem) => {
     const stockIdentity = item as StockIdentity;
-    return stockIdentity.productId ?? stockIdentity.id ?? item.produto;
+    return stockIdentity.productId ?? stockIdentity.id ?? item.codigo ?? item.produto;
   };
 
-  const buildInventoryUpdatePayload = (
-    item: StockItem,
-    changes?: Partial<{ total: number }>,
-  ) => {
-    const total = changes?.total ?? item.total;
-    const quantityToAdd = total - item.total;
-
-    if (quantityToAdd <= 0) {
-      return null;
-    }
-
-    return {
-      quantity: quantityToAdd,
-      reason: 'Entrada manual no painel web',
-    };
+  const getRealStockProductId = (item: StockItem) => {
+    const stockIdentity = item as StockIdentity;
+    return typeof stockIdentity.productId === 'string'
+      ? stockIdentity.productId
+      : typeof stockIdentity.id === 'string'
+        ? stockIdentity.id
+        : undefined;
   };
+
+  const getMinStockLevel = (item: StockItem) => {
+    const stockIdentity = item as StockIdentity;
+    return typeof stockIdentity.minStockLevel === 'number' && Number.isFinite(stockIdentity.minStockLevel)
+      ? stockIdentity.minStockLevel
+      : 0;
+  };
+
+  const mapMovement = (movement: StockMovementResponse, index: number): StockMovement => ({
+    id: typeof movement.id === 'string' && movement.id.trim() ? movement.id : `${Date.now()}-${index}`,
+    product: movement.productId,
+    type: normalizeMovementType(movement.movementType),
+    quantity: typeof movement.quantity === 'number' ? movement.quantity : 0,
+    source: movement.reason ?? movement.referenceId ?? 'Movimentacao de estoque',
+    createdAt: movement.createdAt,
+  });
 
   const updateStockItemLocally = (
     productId: string,
-    changes: Partial<Pick<StockItem, 'codigo' | 'produto' | 'total' | 'reservado' | 'fotoUrl'>>,
+    changes: Partial<StockIdentity>,
   ) => {
     setStock(currentStock =>
       currentStock.map(item =>
@@ -136,23 +145,6 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     return 'Falha na comunicacao com a API.';
   };
 
-  const runWithFallback = async (syncKey: string, onApiAction: () => Promise<void>, onLocalFallback: () => void) => {
-    setIsSyncingStock(syncKey);
-    setStockActionError('');
-    setImportError('');
-
-    try {
-      await onApiAction();
-      setUsingLocalStockFallback(false);
-    } catch {
-      onLocalFallback();
-      setUsingLocalStockFallback(true);
-      setStockActionError('API indisponivel. A alteracao foi simulada localmente.');
-    } finally {
-      setIsSyncingStock('');
-    }
-  };
-
   useEffect(() => {
     const nextEditableRows = stock.reduce<EditableRowState>((acc, item) => {
       acc[item.produto] = {
@@ -166,6 +158,10 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
   }, [stock]);
 
   useEffect(() => {
+    if (!showMovementHistory) {
+      return;
+    }
+
     let active = true;
 
     const loadMovements = async () => {
@@ -175,22 +171,13 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
           return;
         }
 
-        const mapped = response.map((movement, index) => ({
-          id: typeof movement.id === 'string' ? movement.id : `${Date.now()}-${index}`,
-          product: movement.productName ?? movement.productId ?? 'Produto',
-          type: normalizeMovementType(movement.type),
-          quantity: typeof movement.quantity === 'number' ? movement.quantity : 0,
-          source: movement.source ?? 'Movimentacao API',
-          createdAt: movement.createdAt ?? new Date().toISOString(),
-        }));
-
-        setApiMovements(mapped);
+        setApiMovements(response.map(mapMovement));
       } catch {
         if (!active) {
           return;
         }
 
-        setApiMovements(null);
+        setApiMovements([]);
       }
     };
 
@@ -199,61 +186,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     return () => {
       active = false;
     };
-  }, []);
-
-  const applyStockUpdateLocally = (
-    productId: string,
-    productName: string,
-    oldTotal: number,
-    oldReserved: number,
-    newTotal: number,
-    newReserved: number,
-  ) => {
-    const movementsToRegister: Array<Omit<StockMovement, 'id' | 'createdAt'>> = [];
-    const totalDiff = newTotal - oldTotal;
-    const reservedDiff = newReserved - oldReserved;
-
-    if (totalDiff > 0) {
-      movementsToRegister.push({
-        product: productName,
-        type: 'ENTRY',
-        quantity: totalDiff,
-        source: 'Ajuste manual de estoque fisico',
-      });
-    } else if (totalDiff < 0) {
-      movementsToRegister.push({
-        product: productName,
-        type: 'EXIT',
-        quantity: Math.abs(totalDiff),
-        source: 'Ajuste manual de estoque fisico',
-      });
-    }
-
-    if (reservedDiff > 0) {
-      movementsToRegister.push({
-        product: productName,
-        type: 'RESERVATION',
-        quantity: reservedDiff,
-        source: 'Ajuste manual de reservado',
-      });
-    } else if (reservedDiff < 0) {
-      movementsToRegister.push({
-        product: productName,
-        type: 'RELEASE',
-        quantity: Math.abs(reservedDiff),
-        source: 'Liberacao manual de reservado',
-      });
-    }
-
-    updateStockItemLocally(productId, {
-      total: newTotal,
-      reservado: newReserved,
-    });
-
-    if (movementsToRegister.length > 0) {
-      onRegisterMovements(movementsToRegister);
-    }
-  };
+  }, [showMovementHistory]);
 
   const handleSaveRow = async (productName: string) => {
     const stockItem = stock.find(item => item.produto === productName);
@@ -263,230 +196,79 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       return;
     }
 
-    const newTotal = Number(editable.total);
-    const newReserved = Number(editable.reserved);
-
-    if (!Number.isFinite(newTotal) || !Number.isFinite(newReserved) || newTotal < 0 || newReserved < 0) {
+    const nextTotal = Number(editable.total);
+    if (!Number.isFinite(nextTotal) || nextTotal < 0) {
       setRowErrors(current => ({ ...current, [productName]: 'Valores invalidos. Use numeros positivos.' }));
       return;
     }
 
-    if (newReserved > newTotal) {
-      setRowErrors(current => ({ ...current, [productName]: 'Reservado nao pode ser maior que total.' }));
+    const productId = getRealStockProductId(stockItem);
+    if (!isValidApiId(productId)) {
+      setRowErrors(current => ({ ...current, [productName]: '' }));
+      setStockActionError('Produto sem ID real: não foi possível ajustar estoque.');
       return;
     }
 
+    const currentTotal = stockItem.total;
+    const quantityToAdd = nextTotal - currentTotal;
+
+    if (quantityToAdd <= 0) {
+      setRowErrors(current => ({ ...current, [productName]: '' }));
+      setStockActionError('O backend atual permite apenas entrada de estoque. Para reduzir ou definir total menor, será necessário endpoint específico.');
+      return;
+    }
+
+    setIsSyncingStock(`save-row:${productId}`);
+    setStockActionError('');
     setRowErrors(current => ({ ...current, [productName]: '' }));
 
-    const productId = String(getStockProductId(stockItem));
-
-    await runWithFallback(
-      `save-row:${productId}`,
-      async () => {
-        const inventoryPayload = buildInventoryUpdatePayload(stockItem, {
-          total: newTotal,
-        });
-
-        if (inventoryPayload) {
-          await updateInventory(productId, inventoryPayload);
-        }
-
-        applyStockUpdateLocally(
-          productId,
-          stockItem.produto,
-          stockItem.total,
-          stockItem.reservado,
-          newTotal,
-          newReserved,
-        );
-      },
-      () => {
-        applyStockUpdateLocally(
-          productId,
-          stockItem.produto,
-          stockItem.total,
-          stockItem.reservado,
-          newTotal,
-          newReserved,
-        );
-      },
-    );
-  };
-
-  const applyImportedRowsLocally = (rows: Array<{ codigo: string; produto: string; total: number; reservado: number }>) => {
-    let updatedCount = 0;
-    const importMovements: Array<Omit<StockMovement, 'id' | 'createdAt'>> = [];
-
-    setStock(currentStock => {
-      const byProduct = new Map(currentStock.map(item => [item.produto, item]));
-
-      rows.forEach(row => {
-        if (!Number.isFinite(row.total) || !Number.isFinite(row.reservado) || row.total < 0 || row.reservado < 0 || row.reservado > row.total) {
-          return;
-        }
-
-        const previous = byProduct.get(row.produto);
-        if (!previous) {
-          byProduct.set(row.produto, {
-            codigo: row.codigo,
-            produto: row.produto,
-            total: row.total,
-            reservado: row.reservado,
-          });
-          updatedCount += 1;
-
-          if (row.total > 0) {
-            importMovements.push({
-              product: row.produto,
-              type: 'ENTRY',
-              quantity: row.total,
-              source: 'Importacao CSV',
-            });
-          }
-
-          if (row.reservado > 0) {
-            importMovements.push({
-              product: row.produto,
-              type: 'RESERVATION',
-              quantity: row.reservado,
-              source: 'Importacao CSV',
-            });
-          }
-
-          return;
-        }
-
-        const totalDiff = row.total - previous.total;
-        const reservedDiff = row.reservado - previous.reservado;
-
-        byProduct.set(row.produto, { ...previous, total: row.total, reservado: row.reservado });
-        updatedCount += 1;
-
-        if (totalDiff > 0) {
-          importMovements.push({
-            product: row.produto,
-            type: 'ENTRY',
-            quantity: totalDiff,
-            source: 'Importacao CSV',
-          });
-        } else if (totalDiff < 0) {
-          importMovements.push({
-            product: row.produto,
-            type: 'EXIT',
-            quantity: Math.abs(totalDiff),
-            source: 'Importacao CSV',
-          });
-        }
-
-        if (reservedDiff > 0) {
-          importMovements.push({
-            product: row.produto,
-            type: 'RESERVATION',
-            quantity: reservedDiff,
-            source: 'Importacao CSV',
-          });
-        } else if (reservedDiff < 0) {
-          importMovements.push({
-            product: row.produto,
-            type: 'RELEASE',
-            quantity: Math.abs(reservedDiff),
-            source: 'Importacao CSV',
-          });
-        }
+    try {
+      const inventory = await updateInventory(productId, {
+        quantity: quantityToAdd,
+        reason: 'Entrada manual no painel web',
       });
 
-      return Array.from(byProduct.values());
-    });
+      updateStockItemLocally(productId, {
+        inventoryId: inventory.inventoryId,
+        total: inventory.totalQuantity,
+        reservado: inventory.reservedQuantity,
+        totalQuantity: inventory.totalQuantity,
+        reservedQuantity: inventory.reservedQuantity,
+        availableQuantity: inventory.availableQuantity,
+        badges: inventory.badges,
+      });
 
-    if (importMovements.length > 0) {
-      onRegisterMovements(importMovements);
-    }
+      setImportFeedback('Estoque atualizado com sucesso.');
 
-    setImportFeedback(`${updatedCount} produto(s) processado(s) via CSV.`);
-  };
-
-  const parseCsvRows = (text: string) => {
-    const lines = text
-      .split(/\r?\n/)
-      .map(line => line.trim())
-      .filter(Boolean);
-
-    if (lines.length < 2) {
-      throw new Error('CSV vazio ou sem linhas de dados.');
-    }
-
-    const headers = lines[0].split(',').map(header => header.trim().toLowerCase());
-    const productIndex = headers.findIndex(h => h === 'produto' || h === 'product');
-    const totalIndex = headers.findIndex(h => h === 'total_quantity' || h === 'total');
-    const reservedIndex = headers.findIndex(h => h === 'reserved_quantity' || h === 'reserved' || h === 'reservado');
-    const codeIndex = headers.findIndex(h => h === 'codigo' || h === 'code' || h === 'sku');
-
-    if (productIndex === -1 || totalIndex === -1 || reservedIndex === -1) {
-      throw new Error('Cabecalho invalido. Use: produto,total_quantity,reserved_quantity');
-    }
-
-    return lines.slice(1)
-      .map(line => {
-        const cols = line.split(',').map(col => col.trim());
-        const fallbackCode = `CSV-${cols[productIndex]?.replace(/\s+/g, '-').toUpperCase()}`;
-        return {
-          codigo: codeIndex >= 0 ? cols[codeIndex] : fallbackCode,
-          produto: cols[productIndex],
-          total: Number(cols[totalIndex]),
-          reservado: Number(cols[reservedIndex]),
-        };
-      })
-      .filter(row => row.produto);
-  };
-
-  const handleImportCsv = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) {
-      return;
-    }
-
-    setImportFeedback('');
-    setImportError('');
-
-    try {
-      setIsSyncingStock('import-csv');
-      await importInventoryCsv(file);
-
-      try {
-        const latestMovements = await getInventoryMovements();
-        const mapped = latestMovements.map((movement, index) => ({
-          id: typeof movement.id === 'string' ? movement.id : `${Date.now()}-${index}`,
-          product: movement.productName ?? movement.productId ?? 'Produto',
-          type: normalizeMovementType(movement.type),
-          quantity: typeof movement.quantity === 'number' ? movement.quantity : 0,
-          source: movement.source ?? 'Movimentacao API',
-          createdAt: movement.createdAt ?? new Date().toISOString(),
-        }));
-
-        setApiMovements(mapped);
-      } catch {
-        setApiMovements(null);
+      if (showMovementHistory) {
+        const refreshedMovements = await getInventoryMovements();
+        setApiMovements(refreshedMovements.map(mapMovement));
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) {
+        setStockActionError('Você não tem permissão para ajustar o estoque deste produto.');
+      } else if (error instanceof ApiError && error.status === 404) {
+        setStockActionError('Produto não encontrado no backend ou estoque ainda não inicializado. Alteração não salva.');
+      } else if (error instanceof ApiError && error.status >= 500) {
+        setStockActionError('Erro interno ao ajustar estoque. Tente novamente em instantes.');
+      } else {
+        setStockActionError(getApiErrorMessage(error));
       }
 
-      setImportFeedback('Importacao enviada para API com sucesso.');
-      setUsingLocalStockFallback(false);
-      event.target.value = '';
-    } catch {
-      // fallback local para demonstracao enquanto o endpoint de importacao nao esta disponivel
-      try {
-        const text = await file.text();
-        const rows = parseCsvRows(text);
-        applyImportedRowsLocally(rows);
-        setImportFeedback('API indisponivel. A importacao foi simulada localmente.');
-        setUsingLocalStockFallback(true);
-      } catch (parseError) {
-        setImportError(getApiErrorMessage(parseError));
-      }
-
-      event.target.value = '';
+      setEditableRows(current => ({
+        ...current,
+        [productName]: {
+          total: String(currentTotal),
+          reserved: String(stockItem.reservado),
+        },
+      }));
     } finally {
       setIsSyncingStock('');
     }
+  };
+
+  const handleImportCsvDisabled = () => {
+    setStockActionError('Importação CSV será configurada na próxima etapa.');
   };
 
   const effectiveMovements = apiMovements ?? movements;
@@ -514,7 +296,8 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
   const filteredStock = stock.filter(item => {
     const available = item.total - item.reservado;
-    const isLowStock = available <= 20;
+    const minStockLevel = getMinStockLevel(item);
+    const isLowStock = minStockLevel > 0 && available <= minStockLevel;
 
     if (showOnlyLowStock && !isLowStock) {
       return false;
@@ -534,93 +317,83 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
   });
 
   const handleAddNewProduct = async () => {
-    const { codigo, produto, total, reservado, fotoUrl } = newProduct;
+    const { produto, minStockLevel, imageUrl } = newProduct;
 
-    if (!codigo.trim() || !produto.trim()) {
-      setImportFeedback('Codigo e descricao sao obrigatorios.');
+    if (!produto.trim()) {
+      setImportFeedback('Nome do produto e obrigatorio.');
       return;
     }
 
-    const totalNum = Number(total);
-    const reservadoNum = Number(reservado);
+    const minStockLevelNumber = Number(minStockLevel);
 
-    if (!Number.isFinite(totalNum) || !Number.isFinite(reservadoNum) || totalNum < 0 || reservadoNum < 0) {
-      setImportFeedback('Valores invalidos. Use numeros positivos.');
+    if (!Number.isFinite(minStockLevelNumber) || minStockLevelNumber < 0) {
+      setImportFeedback('Estoque minimo invalido. Use numero positivo.');
       return;
     }
 
-    if (reservadoNum > totalNum) {
-      setImportFeedback('Reservado nao pode ser maior que total.');
-      return;
-    }
-
-    if (stock.some(item => item.codigo.toLowerCase() === codigo.toLowerCase())) {
-      setImportFeedback('Produto com este codigo ja existe.');
-      return;
-    }
-
-    const localInsert = () => {
+    const localInsert = (productId: string, supplierId = '', isMock = false) => {
+      const normalizedName = produto.trim();
+      const resolvedId = isMock ? productId : productId.trim();
       setStock(currentStock => [
         ...currentStock,
         {
-          codigo,
-          produto,
-          total: totalNum,
-          reservado: reservadoNum,
-          fotoUrl: fotoUrl || undefined,
-        },
+          codigo: resolvedId,
+          produto: normalizedName,
+          name: normalizedName,
+          total: 0,
+          reservado: 0,
+          fotoUrl: imageUrl.trim() || undefined,
+          id: resolvedId,
+          productId: resolvedId,
+          supplierId,
+          minStockLevel: minStockLevelNumber,
+          imageUrl: imageUrl.trim() || undefined,
+          totalQuantity: 0,
+          reservedQuantity: 0,
+          availableQuantity: 0,
+          badges: [],
+        } as StockItem,
       ]);
 
-      const movementsToRegister: Array<Omit<StockMovement, 'id' | 'createdAt'>> = [];
-      if (totalNum > 0) {
-        movementsToRegister.push({
-          product: produto,
-          type: 'ENTRY',
-          quantity: totalNum,
-          source: 'Novo produto cadastrado',
-        });
-      }
-      if (reservadoNum > 0) {
-        movementsToRegister.push({
-          product: produto,
-          type: 'RESERVATION',
-          quantity: reservadoNum,
-          source: 'Novo produto cadastrado',
-        });
-      }
-
-      if (movementsToRegister.length > 0) {
-        onRegisterMovements(movementsToRegister);
-      }
+      return resolvedId;
     };
 
-    await runWithFallback(
-      `create-product:${codigo}`,
-      async () => {
-        await createProduct({
-          name: produto,
-          minStockLevel: 0,
-        });
+    setIsSyncingStock(`create-product:${produto.trim()}`);
+    setStockActionError('');
 
-        localInsert();
-      },
-      localInsert,
-    );
+    try {
+      const apiProduct = await createProduct({
+        name: produto.trim(),
+        minStockLevel: minStockLevelNumber,
+        imageUrl: imageUrl.trim() || undefined,
+      });
 
-    setImportFeedback(`Produto "${produto}" cadastrado com sucesso!`);
-    setNewProduct({ codigo: '', produto: '', total: '0', reservado: '0', fotoUrl: '' });
-    setShowNewProductForm(false);
+      localInsert(apiProduct.id, apiProduct.supplierId);
+      setImportFeedback(`Produto "${apiProduct.name}" cadastrado com sucesso!`);
+
+      setUsingLocalStockFallback(false);
+      setNewProduct({ produto: '', minStockLevel: '0', imageUrl: '' });
+      setShowNewProductForm(false);
+    } catch {
+      localInsert(`mock-${Date.now()}`, '', true);
+      setUsingLocalStockFallback(true);
+      setStockActionError('API indisponivel. A alteracao foi simulada localmente.');
+      setImportFeedback(`Produto "${produto}" cadastrado localmente.`);
+      setNewProduct({ produto: '', minStockLevel: '0', imageUrl: '' });
+      setShowNewProductForm(false);
+    } finally {
+      setIsSyncingStock('');
+    }
   };
 
   const handleOpenEditModal = (item: StockItem) => {
+    const stockIdentity = item as StockIdentity;
     setEditModalError('');
     setEditingProduct({
-      originalCodigo: item.codigo,
-      codigo: item.codigo,
+      productId: String(getStockProductId(item)),
       produto: item.produto,
-      total: String(item.total),
-      reservado: String(item.reservado),
-      fotoUrl: item.fotoUrl ?? '',
+      minStockLevel: String(stockIdentity.minStockLevel ?? 0),
+      imageUrl: stockIdentity.imageUrl ?? item.fotoUrl ?? '',
     });
   };
 
@@ -629,117 +402,84 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       return;
     }
 
-    const codigo = editingProduct.codigo.trim();
+    const productId = editingProduct.productId;
     const produto = editingProduct.produto.trim();
-    const total = Number(editingProduct.total);
-    const reservado = Number(editingProduct.reservado);
-    const fotoUrl = editingProduct.fotoUrl.trim();
+    const minStockLevelNumber = Number(editingProduct.minStockLevel);
+    const imageUrl = editingProduct.imageUrl.trim();
 
-    if (!codigo || !produto) {
-      setEditModalError('Codigo e descricao sao obrigatorios.');
+    if (!produto) {
+      setEditModalError('Nome do produto e obrigatorio.');
       return;
     }
 
-    if (!Number.isFinite(total) || !Number.isFinite(reservado) || total < 0 || reservado < 0) {
-      setEditModalError('Valores invalidos. Use numeros positivos.');
+    if (!Number.isFinite(minStockLevelNumber) || minStockLevelNumber < 0) {
+      setEditModalError('Estoque minimo invalido. Use numero positivo.');
       return;
     }
 
-    if (reservado > total) {
-      setEditModalError('Reservado nao pode ser maior que total.');
-      return;
-    }
-
-    const duplicateCode = stock.some(
-      item => item.codigo.toLowerCase() === codigo.toLowerCase() && item.codigo !== editingProduct.originalCodigo,
-    );
-    if (duplicateCode) {
-      setEditModalError('Ja existe um produto com este codigo.');
-      return;
-    }
-
-    const previous = stock.find(item => item.codigo === editingProduct.originalCodigo);
+    const previous = stock.find(item => String(getStockProductId(item)) === productId);
     if (!previous) {
       setEditModalError('Produto nao encontrado para edicao.');
       return;
     }
 
-    const totalDiff = total - previous.total;
-    const reservedDiff = reservado - previous.reservado;
-    const movementsToRegister: Array<Omit<StockMovement, 'id' | 'createdAt'>> = [];
-
-    if (totalDiff > 0) {
-      movementsToRegister.push({
-        product: produto,
-        type: 'ENTRY',
-        quantity: totalDiff,
-        source: 'Ajuste via edicao do produto',
-      });
-    } else if (totalDiff < 0) {
-      movementsToRegister.push({
-        product: produto,
-        type: 'EXIT',
-        quantity: Math.abs(totalDiff),
-        source: 'Ajuste via edicao do produto',
-      });
-    }
-
-    if (reservedDiff > 0) {
-      movementsToRegister.push({
-        product: produto,
-        type: 'RESERVATION',
-        quantity: reservedDiff,
-        source: 'Ajuste via edicao do produto',
-      });
-    } else if (reservedDiff < 0) {
-      movementsToRegister.push({
-        product: produto,
-        type: 'RELEASE',
-        quantity: Math.abs(reservedDiff),
-        source: 'Ajuste via edicao do produto',
-      });
-    }
-
-    const productId = String(getStockProductId(previous));
+    const realProductId = getRealStockProductId(previous);
 
     const localUpdate = () => {
       updateStockItemLocally(productId, {
-        codigo,
         produto,
-        total,
-        reservado,
-        fotoUrl: fotoUrl || undefined,
-      });
-
-      if (movementsToRegister.length > 0) {
-        onRegisterMovements(movementsToRegister);
-      }
+        minStockLevel: minStockLevelNumber,
+        imageUrl: imageUrl || undefined,
+        fotoUrl: imageUrl || undefined,
+      } as Partial<StockIdentity>);
     };
 
-    await runWithFallback(
-      `update-product:${productId}`,
-      async () => {
-        await updateProduct(productId, {
-          name: produto,
-          minStockLevel: 0,
-        });
+    if (!isValidApiId(realProductId)) {
+      localUpdate();
+      setStockActionError('Produto sem ID real: ação simulada localmente.');
+      setImportFeedback(`Produto "${produto}" atualizado localmente.`);
+      setEditingProduct(null);
+      setEditModalError('');
+      return;
+    }
 
-        const inventoryPayload = buildInventoryUpdatePayload(previous, {
-          total,
-        });
-
-        if (inventoryPayload) {
-          await updateInventory(productId, inventoryPayload);
-        }
-
-        localUpdate();
-      },
-      localUpdate,
-    );
-
-    setImportFeedback(`Produto "${produto}" atualizado com sucesso.`);
-    setEditingProduct(null);
+    setIsSyncingStock(`update-product:${realProductId}`);
     setEditModalError('');
+
+    try {
+      const apiProduct = await updateProduct(realProductId, {
+        name: produto,
+        minStockLevel: minStockLevelNumber,
+        imageUrl: imageUrl || undefined,
+      });
+
+      updateStockItemLocally(productId, {
+        id: apiProduct.id,
+        productId: apiProduct.id,
+        supplierId: apiProduct.supplierId,
+        codigo: apiProduct.id,
+        name: apiProduct.name,
+        produto: apiProduct.name,
+        minStockLevel: apiProduct.minStockLevel,
+        imageUrl: apiProduct.imageUrl,
+        fotoUrl: apiProduct.imageUrl,
+      } as Partial<StockIdentity>);
+
+      setImportFeedback(`Produto "${apiProduct.name}" atualizado com sucesso.`);
+      setEditingProduct(null);
+      setEditModalError('');
+      setUsingLocalStockFallback(false);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) {
+        setEditModalError('Você não tem permissão para editar este produto.');
+      } else if (error instanceof ApiError && error.status === 404) {
+        setEditModalError('Produto não encontrado no backend.');
+      } else {
+        setEditModalError(getApiErrorMessage(error));
+      }
+    } finally {
+      setIsSyncingStock('');
+    }
   };
 
   const handleDeleteProductFromModal = async () => {
@@ -747,41 +487,49 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       return;
     }
 
-    const previous = stock.find(item => item.codigo === editingProduct.originalCodigo);
+    const previous = stock.find(item => String(getStockProductId(item)) === editingProduct.productId);
     if (!previous) {
       setEditModalError('Produto nao encontrado para exclusao.');
       return;
     }
 
     const productId = String(getStockProductId(previous));
+    const realProductId = getRealStockProductId(previous);
 
     const localDelete = () => {
       setStock(currentStock => currentStock.filter(item => getStockProductId(item) !== productId));
-
-      if (previous.total > 0) {
-        onRegisterMovements([
-          {
-            product: previous.produto,
-            type: 'EXIT',
-            quantity: previous.total,
-            source: 'Produto removido do catalogo',
-          },
-        ]);
-      }
     };
 
-    await runWithFallback(
-      `delete-product:${productId}`,
-      async () => {
-        await deleteProduct(productId);
-        localDelete();
-      },
-      localDelete,
-    );
+    if (!isValidApiId(realProductId)) {
+      localDelete();
+      setStockActionError('Produto sem ID real: ação simulada localmente.');
+      setImportFeedback(`Produto "${previous.produto}" removido localmente.`);
+      setEditingProduct(null);
+      setEditModalError('');
+      return;
+    }
 
-    setImportFeedback(`Produto "${previous.produto}" removido.`);
-    setEditingProduct(null);
+    setIsSyncingStock(`delete-product:${realProductId}`);
     setEditModalError('');
+
+    try {
+      await deleteProduct(realProductId);
+      localDelete();
+      setImportFeedback(`Produto "${previous.produto}" removido.`);
+      setEditingProduct(null);
+      setEditModalError('');
+      setUsingLocalStockFallback(false);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) {
+        setEditModalError('Você não tem permissão para remover este produto.');
+      } else if (error instanceof ApiError && error.status === 404) {
+        setEditModalError('Produto não encontrado no backend.');
+      } else {
+        setEditModalError(getApiErrorMessage(error));
+      }
+    } finally {
+      setIsSyncingStock('');
+    }
   };
 
   return (
@@ -828,10 +576,13 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
             >
               {showMovementHistory ? '✕ Fechar historico' : '+ Historico de movimentacoes'}
             </button>
-            <label className="inline-flex items-center gap-2 text-xs px-3 py-2 rounded-md border border-[#2a2a2a] light:border-gray-300 text-gray-300 light:text-gray-700 cursor-pointer hover:bg-[#1a1a1a] dark:hover:bg-[#1a1a1a] light:hover:bg-gray-100 transition-colors">
+            <button
+              type="button"
+              onClick={handleImportCsvDisabled}
+              className="text-xs px-3 py-2 rounded-md border border-[#2a2a2a] light:border-gray-300 text-gray-300 light:text-gray-700 hover:bg-[#1a1a1a] dark:hover:bg-[#1a1a1a] light:hover:bg-gray-100 transition-colors"
+            >
               Importar CSV
-              <input type="file" accept=".csv" className="hidden" onChange={handleImportCsv} disabled={isSyncingStock === 'import-csv'} />
-            </label>
+            </button>
           </div>
         </div>
 
@@ -853,26 +604,12 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
           <p className="px-5 py-3 text-sm text-[#00ff66] light:text-green-700 border-b border-[#222222] light:border-gray-200">{importFeedback}</p>
         )}
 
-        {importError && (
-          <p className="px-5 py-3 text-sm text-red-400 light:text-red-700 border-b border-[#222222] light:border-gray-200">{importError}</p>
-        )}
-
         {showNewProductForm && (
           <div className="px-5 py-4 bg-[#0a0a0a] dark:bg-[#0a0a0a] light:bg-gray-50 border-b border-[#222222] light:border-gray-200">
             <h3 className="text-sm font-semibold !text-white dark:!text-white light:!text-gray-900 mb-3">Cadastrar novo produto</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
               <div>
-                <label className="text-xs text-gray-400 light:text-gray-600">Codigo</label>
-                <input
-                  type="text"
-                  value={newProduct.codigo}
-                  onChange={event => setNewProduct({ ...newProduct, codigo: event.target.value })}
-                  placeholder="Ex: ARR001"
-                  className="w-full rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-2 text-xs text-white dark:text-white light:text-gray-900 mt-1"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400 light:text-gray-600">Descricao</label>
+                <label className="text-xs text-gray-400 light:text-gray-600">Nome do produto</label>
                 <input
                   type="text"
                   value={newProduct.produto}
@@ -882,52 +619,24 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                 />
               </div>
               <div>
-                <label className="text-xs text-gray-400 light:text-gray-600">Total</label>
+                <label className="text-xs text-gray-400 light:text-gray-600">Estoque mínimo</label>
                 <input
                   type="number"
-                  value={newProduct.total}
-                  onChange={event => setNewProduct({ ...newProduct, total: event.target.value })}
+                  value={newProduct.minStockLevel}
+                  onChange={event => setNewProduct({ ...newProduct, minStockLevel: event.target.value })}
                   min={0}
                   className="w-full rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-2 text-xs text-white dark:text-white light:text-gray-900 mt-1"
                 />
               </div>
               <div>
-                <label className="text-xs text-gray-400 light:text-gray-600">Reservado</label>
+                <label className="text-xs text-gray-400 light:text-gray-600">URL da imagem (opcional)</label>
                 <input
-                  type="number"
-                  value={newProduct.reservado}
-                  onChange={event => setNewProduct({ ...newProduct, reservado: event.target.value })}
-                  min={0}
+                  type="url"
+                  value={newProduct.imageUrl}
+                  onChange={event => setNewProduct({ ...newProduct, imageUrl: event.target.value })}
+                  placeholder="https://..."
                   className="w-full rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-2 text-xs text-white dark:text-white light:text-gray-900 mt-1"
                 />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400 light:text-gray-600">Foto</label>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={async event => {
-                    const file = event.target.files?.[0];
-                    if (!file) {
-                      return;
-                    }
-                    try {
-                      const foto = await fileToDataUrl(file);
-                      setNewProduct(current => ({ ...current, fotoUrl: foto }));
-                    } catch {
-                      setImportFeedback('Nao foi possivel carregar a foto do produto.');
-                    }
-                    event.target.value = '';
-                  }}
-                  className="w-full rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-1.5 text-xs text-white dark:text-white light:text-gray-900 mt-1 file:mr-2 file:border-0 file:bg-transparent file:text-xs file:text-gray-400"
-                />
-                {newProduct.fotoUrl && (
-                  <img
-                    src={newProduct.fotoUrl}
-                    alt="Preview do produto"
-                    className="mt-2 h-14 w-14 rounded-md object-cover border border-[#2a2a2a] light:border-gray-300"
-                  />
-                )}
               </div>
             </div>
             <button
@@ -956,7 +665,8 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
             <tbody>
               {filteredStock.map(item => {
                 const available = item.total - item.reservado;
-                const isLowStock = available <= 20;
+                const minStockLevel = getMinStockLevel(item);
+                const isLowStock = minStockLevel > 0 && available <= minStockLevel;
                 const rowEdit = editableRows[item.produto] ?? { total: String(item.total), reserved: String(item.reservado) };
                 const rowSyncKey = `save-row:${String(getStockProductId(item))}`;
 
@@ -994,17 +704,8 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                         type="number"
                         min={0}
                         value={rowEdit.reserved}
-                        onChange={event => {
-                          const value = event.target.value;
-                          setEditableRows(current => ({
-                            ...current,
-                            [item.produto]: {
-                              total: current[item.produto]?.total ?? String(item.total),
-                              reserved: value,
-                            },
-                          }));
-                        }}
-                        className="w-24 rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-1 text-xs text-white dark:text-white light:text-gray-900"
+                        readOnly
+                        className="w-24 rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-100 border border-[#2a2a2a] light:border-gray-300 px-2 py-1 text-xs text-white dark:text-white light:text-gray-700 cursor-not-allowed"
                       />
                     </td>
                     <td className={`px-5 py-4 text-sm ${isLowStock ? 'bg-amber-500/20 dark:bg-amber-500/20 light:bg-amber-100' : ''}`}>
@@ -1027,7 +728,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                           disabled={isSyncingStock === rowSyncKey}
                           className="text-xs px-2.5 py-1 rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 hover:bg-[#00ff66]/25 transition-colors disabled:opacity-60"
                         >
-                          Salvar
+                          Adicionar estoque
                         </button>
                         <button
                           type="button"
@@ -1082,19 +783,20 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
             <div className="max-h-[400px] overflow-y-auto p-4 space-y-2 bg-[#0a0a0a] dark:bg-[#0a0a0a] light:bg-gray-50">
               {filteredMovements.length === 0 && (
-                <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma movimentacao para os filtros selecionados.</p>
+                <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma movimentação registrada.</p>
               )}
 
               {filteredMovements.map(movement => (
                 <div key={movement.id} className="rounded-lg border border-[#2a2a2a] light:border-gray-200 p-3">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm text-white dark:text-white light:text-gray-900">{movement.product}</p>
+                    <p className="text-sm text-white dark:text-white light:text-gray-900">Produto: {movement.product}</p>
                     <span className={`text-xs px-2 py-1 rounded-full ${movementTypeClass[movement.type]}`}>
                       {movementTypeLabels[movement.type]}
                     </span>
                   </div>
+                  <p className="text-xs text-gray-400 light:text-gray-600 mt-1">Tipo: {movement.type}</p>
                   <p className="text-xs text-gray-400 light:text-gray-600 mt-1">Quantidade: {movement.quantity}</p>
-                  <p className="text-xs text-gray-500 mt-1">{movement.source}</p>
+                  <p className="text-xs text-gray-500 mt-1">Motivo: {movement.source || '-'}</p>
                   <p className="text-[11px] text-gray-500 mt-1">{toLocalDateTime(movement.createdAt)}</p>
                 </div>
               ))}
@@ -1121,17 +823,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
               <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
-                  <label className="text-xs text-gray-400 light:text-gray-600">Codigo</label>
-                  <input
-                    type="text"
-                    value={editingProduct.codigo}
-                    onChange={event => setEditingProduct(current => (current ? { ...current, codigo: event.target.value } : null))}
-                    className="w-full rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-2 text-xs text-white dark:text-white light:text-gray-900 mt-1"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs text-gray-400 light:text-gray-600">Descricao</label>
+                  <label className="text-xs text-gray-400 light:text-gray-600">Nome do produto</label>
                   <input
                     type="text"
                     value={editingProduct.produto}
@@ -1141,50 +833,28 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                 </div>
 
                 <div>
-                  <label className="text-xs text-gray-400 light:text-gray-600">Total</label>
+                  <label className="text-xs text-gray-400 light:text-gray-600">Estoque mínimo para alerta</label>
                   <input
                     type="number"
                     min={0}
-                    value={editingProduct.total}
-                    onChange={event => setEditingProduct(current => (current ? { ...current, total: event.target.value } : null))}
-                    className="w-full rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-2 text-xs text-white dark:text-white light:text-gray-900 mt-1"
-                  />
-                </div>
-
-                <div>
-                  <label className="text-xs text-gray-400 light:text-gray-600">Reservado</label>
-                  <input
-                    type="number"
-                    min={0}
-                    value={editingProduct.reservado}
-                    onChange={event => setEditingProduct(current => (current ? { ...current, reservado: event.target.value } : null))}
+                    value={editingProduct.minStockLevel}
+                    onChange={event => setEditingProduct(current => (current ? { ...current, minStockLevel: event.target.value } : null))}
                     className="w-full rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-2 text-xs text-white dark:text-white light:text-gray-900 mt-1"
                   />
                 </div>
 
                 <div className="md:col-span-2">
-                  <label className="text-xs text-gray-400 light:text-gray-600">Foto</label>
+                  <label className="text-xs text-gray-400 light:text-gray-600">URL da imagem (opcional)</label>
                   <input
-                    type="file"
-                    accept="image/*"
-                    onChange={async event => {
-                      const file = event.target.files?.[0];
-                      if (!file) {
-                        return;
-                      }
-                      try {
-                        const foto = await fileToDataUrl(file);
-                        setEditingProduct(current => (current ? { ...current, fotoUrl: foto } : null));
-                      } catch {
-                        setEditModalError('Nao foi possivel carregar a foto do produto.');
-                      }
-                      event.target.value = '';
-                    }}
-                    className="w-full rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-1.5 text-xs text-white dark:text-white light:text-gray-900 mt-1 file:mr-2 file:border-0 file:bg-transparent file:text-xs file:text-gray-400"
+                    type="url"
+                    value={editingProduct.imageUrl}
+                    onChange={event => setEditingProduct(current => (current ? { ...current, imageUrl: event.target.value } : null))}
+                    placeholder="https://..."
+                    className="w-full rounded-md bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-2 py-2 text-xs text-white dark:text-white light:text-gray-900 mt-1"
                   />
-                  {editingProduct.fotoUrl && (
+                  {editingProduct.imageUrl && (
                     <img
-                      src={editingProduct.fotoUrl}
+                      src={editingProduct.imageUrl}
                       alt="Foto do produto"
                       className="mt-2 h-20 w-20 rounded-md object-cover border border-[#2a2a2a] light:border-gray-300"
                     />

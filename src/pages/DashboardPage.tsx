@@ -2,22 +2,52 @@ import { useEffect, useMemo, useState } from 'react';
 import { Sidebar, type DashboardSection } from '../Components/Sidebar';
 import { OrderTable } from '../Components/OrderTable';
 import { StockManagementSection } from '../Components/StockManagementSection';
+import { KpiCard } from '../Components/KpiCard';
+import { NewOrderBanner } from '../Components/NewOrderBanner';
+import { SettingsProfileSection } from '../Components/SettingsProfileSection';
 import { mockOrders, mockStock } from '../data/mockData';
+import { ApiError } from '../services/api';
+import { arriveDeliveryPoint, failDeliveryPoint, sendDeliveryProof } from '../services/deliveryPoints';
 import { getInventory } from '../services/inventory';
 import { getOrders } from '../services/orders';
-import { getDashboardReport } from '../services/reports';
-import { getTodayRoute } from '../services/routes';
+import { getSupplierProducts } from '../services/products';
+import { getSupplierById, updateSupplier } from '../services/suppliers';
+import {
+  getAcceptanceRateReport,
+  getDashboardReport,
+  getSalesReport,
+  getTopProductsReport,
+} from '../services/reports';
+import {
+  getProductRatingSummary,
+  getProductReviews,
+  getSupplierRatingSummary,
+  getSupplierReviews,
+} from '../services/reviews';
+import { connectRealtime } from '../services/realtime';
+import { completeRoute, generateRoute, getRoutePoints, getRoutes, getTodayRoutes, startRoute } from '../services/routes';
+import { getCurrentUser, type AuthenticatedUser } from '../services/auth';
 import type { ApiInventoryItem } from '../types/inventory';
-import type { ApiRoute } from '../types/routes';
+import type { ApiProduct } from '../types/products';
+import type { ApiDeliveryPoint, ApiRoute, GenerateRouteStop } from '../types/routes';
 import type { Order, OrderStatus, StockMovement } from '../types/orders';
 import type { ApiOrder } from '../types/orders';
-import type { DashboardReport } from '../types/reports';
+import type {
+  AcceptanceRateReport,
+  DashboardReport,
+  SalesReport,
+  TopProductReport,
+} from '../types/reports';
+import type { RealtimeEvent } from '../types/realtime';
+import type { RatingSummaryResponse, ReviewResponse } from '../types/reviews';
+import type { ApiSupplier } from '../types/suppliers';
 import {
   calculateFallbackKpis,
   getNumberValue,
   mapApiInventoryToLegacyStock,
   mapApiOrderToLegacyOrder,
 } from '../utils/dashboardMappers';
+import { exportOrdersToXlsx } from '../utils/exportOrdersReport';
 
 interface DashboardPageProps {
   theme: 'dark' | 'light';
@@ -53,6 +83,72 @@ type DashboardStockRow = {
   available: number;
   reserved: number;
 };
+
+type SupplierDraft = {
+  companyName: string;
+  companyEmail: string;
+  address: string;
+  phone: string;
+  cnpj: string;
+};
+
+const EMPTY_RATING_SUMMARY: RatingSummaryResponse = {
+  averageRating: 0,
+  totalReviews: 0,
+  ratingDistribution: {},
+};
+
+function mapProductAndInventoryToStock(products: ApiProduct[], inventory: ApiInventoryItem[]) {
+  const inventoryByProductId = new Map<string, ApiInventoryItem>();
+  for (const item of inventory) {
+    if (typeof item.productId === 'string' && item.productId.trim()) {
+      inventoryByProductId.set(item.productId, item);
+    }
+  }
+
+  const merged = products.map(product => {
+    const inventoryItem = inventoryByProductId.get(product.id);
+    const totalQuantity = inventoryItem
+      ? (typeof inventoryItem.totalQuantity === 'number'
+        ? inventoryItem.totalQuantity
+        : 0)
+      : 0;
+    const reservedQuantity = inventoryItem
+      ? (typeof inventoryItem.reservedQuantity === 'number' ? inventoryItem.reservedQuantity : 0)
+      : 0;
+    const availableQuantity = inventoryItem
+      ? (typeof inventoryItem.availableQuantity === 'number'
+        ? inventoryItem.availableQuantity
+        : Math.max(0, totalQuantity - reservedQuantity))
+      : 0;
+
+    return {
+      id: product.id,
+      productId: product.id,
+      supplierId: product.supplierId,
+      codigo: product.id,
+      name: product.name,
+      produto: product.name,
+      minStockLevel: product.minStockLevel,
+      imageUrl: product.imageUrl,
+      fotoUrl: product.imageUrl,
+      total: totalQuantity,
+      reservado: reservedQuantity,
+      totalQuantity,
+      reservedQuantity,
+      availableQuantity,
+      badges: [],
+    };
+  });
+
+  // Keep inventory-only rows visible if backend inventory has orphan items not present in /suppliers/{id}/products.
+  const mergedIds = new Set(merged.map(item => item.productId));
+  const inventoryOnly = inventory
+    .filter(item => typeof item.productId === 'string' && !mergedIds.has(item.productId))
+    .map(item => mapApiInventoryToLegacyStock(item));
+
+  return [...merged, ...inventoryOnly];
+}
 
 const orderFlowColumns: OrderFlowColumn[] = [
   {
@@ -104,6 +200,48 @@ const flowTimeByStatus: Partial<Record<OrderStatus, string>> = {
   ENTREGUE: 'Entregue 07:55',
 };
 
+function isValidApiId(id?: string): boolean {
+  return typeof id === 'string' && id.length >= 20 && !id.startsWith('mock-');
+}
+
+function getRouteStatusLabel(status?: string): string {
+  if (!status) {
+    return 'Planejada';
+  }
+
+  const normalized = status.toUpperCase();
+  const map: Record<string, string> = {
+    PLANNED: 'Planejada',
+    IN_PROGRESS: 'Em andamento',
+    COMPLETED: 'Concluída',
+    CANCELLED: 'Cancelada',
+  };
+
+  return map[normalized] ?? status;
+}
+
+function getDeliveryPointStatusLabel(status?: string): string {
+  if (!status) {
+    return 'Pendente';
+  }
+
+  const normalized = status.toUpperCase();
+  const map: Record<string, string> = {
+    PENDING: 'Pendente',
+    ARRIVED: 'Chegada registrada',
+    DELIVERED: 'Entregue',
+    FAILED: 'Falha na entrega',
+  };
+
+  return map[normalized] ?? status;
+}
+
+function logRealtimeDev(...args: unknown[]) {
+  if (import.meta.env.DEV) {
+    console.log('[dashboard-realtime]', ...args);
+  }
+}
+
 export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: DashboardPageProps) {
   const [activeSection, setActiveSection] = useState<DashboardSection>('VISAO_GERAL');
   const [activeOverviewTab, setActiveOverviewTab] = useState<OverviewTab>('VISAO_GERAL');
@@ -117,7 +255,58 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
   const [apiOrders, setApiOrders] = useState<ApiOrder[]>([]);
   const [apiInventory, setApiInventory] = useState<ApiInventoryItem[]>([]);
   const [todayRoute, setTodayRoute] = useState<ApiRoute[]>([]);
+  const [selectedDriverId] = useState('');
+  const [routeHistory, setRouteHistory] = useState<ApiRoute[]>([]);
+  const [selectedRouteId, setSelectedRouteId] = useState('');
+  const [selectedRoutePoints, setSelectedRoutePoints] = useState<ApiDeliveryPoint[]>([]);
+  const [isSyncingRouteAction, setIsSyncingRouteAction] = useState('');
+  const [routeActionFeedback, setRouteActionFeedback] = useState('');
+  const [routeActionError, setRouteActionError] = useState('');
   const [usingMockFallback, setUsingMockFallback] = useState(false);
+  const [inventoryNotInitialized, setInventoryNotInitialized] = useState(false);
+  const [apiWarning, setApiWarning] = useState('');
+  const [isLoadingReports, setIsLoadingReports] = useState(false);
+  const [reportsError, setReportsError] = useState('');
+  const [reportsWarning, setReportsWarning] = useState('');
+  const [salesReport, setSalesReport] = useState<SalesReport | null>(null);
+  const [topProductsReport, setTopProductsReport] = useState<TopProductReport[]>([]);
+  const [acceptanceRateReport, setAcceptanceRateReport] = useState<AcceptanceRateReport | null>(null);
+  const [isExportingOrdersReport, setIsExportingOrdersReport] = useState(false);
+  const [reportExportMessage, setReportExportMessage] = useState('');
+  const [reportExportError, setReportExportError] = useState('');
+  const [hasLoadedReports, setHasLoadedReports] = useState(false);
+  const [currentUserProfile, setCurrentUserProfile] = useState<AuthenticatedUser | null>(null);
+  const [supplierId, setSupplierId] = useState('');
+  const [supplierProfile, setSupplierProfile] = useState<ApiSupplier | null>(null);
+  const [isLoadingSupplierProfile, setIsLoadingSupplierProfile] = useState(false);
+  const [supplierProfileError, setSupplierProfileError] = useState('');
+  const [supplierSaveMessage, setSupplierSaveMessage] = useState('');
+  const [supplierSaveError, setSupplierSaveError] = useState('');
+  const [isSavingSupplier, setIsSavingSupplier] = useState(false);
+  const [, setIsRealtimeConnected] = useState(false);
+  const [supplierDraft, setSupplierDraft] = useState<SupplierDraft>({
+    companyName: '',
+    companyEmail: '',
+    address: '',
+    phone: '',
+    cnpj: '',
+  });
+  const [isLoadingSupplierReviews, setIsLoadingSupplierReviews] = useState(false);
+  const [supplierReviewsError, setSupplierReviewsError] = useState('');
+  const [supplierReviews, setSupplierReviews] = useState<ReviewResponse[]>([]);
+  const [supplierRatingSummary, setSupplierRatingSummary] = useState<RatingSummaryResponse>(EMPTY_RATING_SUMMARY);
+  const [hasLoadedSupplierReviews, setHasLoadedSupplierReviews] = useState(false);
+  const [isLoadingHighlightedProductReviews, setIsLoadingHighlightedProductReviews] = useState(false);
+  const [highlightedProductReviewsError, setHighlightedProductReviewsError] = useState('');
+  const [highlightedProductReviews, setHighlightedProductReviews] = useState<ReviewResponse[]>([]);
+  const [highlightedProductRatingSummary, setHighlightedProductRatingSummary] = useState<RatingSummaryResponse>(EMPTY_RATING_SUMMARY);
+
+  // Raw API responses — consumed by derived state below and available for future tabs.
+  const hasApiData = useMemo(
+    () => apiOrders.length > 0 || apiInventory.length > 0 || Boolean(dashboardReport) || todayRoute.length > 0 || routeHistory.length > 0,
+    [apiOrders, apiInventory, dashboardReport, todayRoute, routeHistory],
+  );
+  void hasApiData;
 
   useEffect(() => {
     let active = true;
@@ -125,17 +314,29 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     const loadDashboardData = async () => {
       setIsLoadingDashboard(true);
       setDashboardError('');
+      setApiWarning('');
+      setInventoryNotInitialized(false);
 
-      const [reportResult, ordersResult, inventoryResult, routeResult] = await Promise.allSettled([
+      const [reportResult, ordersResult, inventoryResult, todayRouteResult, routeHistoryResult, currentUserResult] = await Promise.allSettled([
         getDashboardReport(),
         getOrders(),
         getInventory(),
-        getTodayRoute(),
+        getTodayRoutes(),
+        getRoutes(),
+        getCurrentUser(),
       ]);
+
+      const currentSupplierId = currentUserResult.status === 'fulfilled' ? currentUserResult.value.supplierId : undefined;
+      const productsResult = currentSupplierId
+        ? await Promise.allSettled([getSupplierProducts(currentSupplierId)]).then(results => results[0])
+        : await Promise.resolve({ status: 'fulfilled', value: [] } as PromiseFulfilledResult<ApiProduct[]>);
 
       if (!active) {
         return;
       }
+
+      setCurrentUserProfile(currentUserResult.status === 'fulfilled' ? currentUserResult.value : null);
+      setSupplierId(typeof currentSupplierId === 'string' ? currentSupplierId : '');
 
       let hasSuccess = false;
       let hasMockFallback = false;
@@ -154,37 +355,66 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       } else {
         setApiOrders([]);
         setOverviewOrders(mockOrders);
+        setApiWarning('Exibindo dados demonstrativos.');
         hasMockFallback = true;
+        hasSuccess = true;
       }
 
       if (inventoryResult.status === 'fulfilled') {
         setApiInventory(inventoryResult.value);
-        setStock(inventoryResult.value.map(mapApiInventoryToLegacyStock));
+        if (productsResult.status === 'fulfilled') {
+          setStock(mapProductAndInventoryToStock(productsResult.value, inventoryResult.value));
+          if (productsResult.value.length > 0 && inventoryResult.value.length === 0) {
+            setApiWarning('Produtos carregados. Estoque ainda não inicializado para alguns itens.');
+            setInventoryNotInitialized(true);
+          }
+        } else {
+          setStock(inventoryResult.value.map(mapApiInventoryToLegacyStock));
+        }
         hasSuccess = true;
       } else {
         setApiInventory([]);
-        setStock(mockStock);
-        hasMockFallback = true;
+        if (productsResult.status === 'fulfilled') {
+          setStock(mapProductAndInventoryToStock(productsResult.value, []));
+          setInventoryNotInitialized(productsResult.value.length > 0);
+          hasSuccess = hasSuccess || productsResult.value.length > 0;
+        } else {
+          setStock([]);
+          setInventoryNotInitialized(true);
+        }
       }
 
-      if (routeResult.status === 'fulfilled') {
-        setTodayRoute(routeResult.value);
+      if (todayRouteResult.status === 'fulfilled') {
+        setTodayRoute(todayRouteResult.value);
+        if (!selectedRouteId && todayRouteResult.value[0]?.id) {
+          setSelectedRouteId(todayRouteResult.value[0].id);
+        }
         hasSuccess = true;
       } else {
         setTodayRoute([]);
       }
 
-      const hasPartialError = [reportResult, ordersResult, inventoryResult, routeResult]
+      if (routeHistoryResult.status === 'fulfilled') {
+        setRouteHistory(routeHistoryResult.value);
+        if (!selectedRouteId && routeHistoryResult.value[0]?.id) {
+          setSelectedRouteId(routeHistoryResult.value[0].id);
+        }
+        hasSuccess = true;
+      } else {
+        setRouteHistory([]);
+      }
+
+      const hasPartialError = [reportResult, ordersResult, inventoryResult, todayRouteResult, routeHistoryResult, productsResult]
         .some(result => result.status === 'rejected');
 
       if (!hasSuccess) {
-        hasMockFallback = true;
-        setOverviewOrders(mockOrders);
-        setStock(mockStock);
+        hasMockFallback = false;
       }
 
-      if (!hasSuccess || hasPartialError) {
-        setDashboardError('Nao foi possivel carregar todos os dados da API. Alguns dados demonstrativos estao sendo exibidos.');
+      if (!hasSuccess) {
+        setDashboardError('Não foi possível carregar os dados do painel.');
+      } else if (hasPartialError && !hasMockFallback) {
+        setApiWarning('Algumas informações ainda não estão disponíveis.');
       }
 
       setUsingMockFallback(hasMockFallback);
@@ -197,6 +427,181 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+
+    const syncOrdersFromRealtime = async () => {
+      try {
+        const latestOrders = await getOrders();
+        if (!active) {
+          return;
+        }
+
+        setApiOrders(latestOrders);
+        setOverviewOrders(latestOrders.map(mapApiOrderToLegacyOrder));
+      } catch (error) {
+        logRealtimeDev('Falha ao sincronizar pedidos por evento realtime.', error);
+      }
+    };
+
+    const syncInventoryFromRealtime = async () => {
+      try {
+        const latestInventory = await getInventory();
+        if (!active) {
+          return;
+        }
+
+        setApiInventory(latestInventory);
+
+        if (isValidApiId(supplierId)) {
+          try {
+            const products = await getSupplierProducts(supplierId);
+            if (!active) {
+              return;
+            }
+
+            setStock(mapProductAndInventoryToStock(products, latestInventory));
+          } catch (error) {
+            logRealtimeDev('Falha ao sincronizar produtos junto ao estoque realtime.', error);
+            setStock(latestInventory.map(mapApiInventoryToLegacyStock));
+          }
+          return;
+        }
+
+        setStock(latestInventory.map(mapApiInventoryToLegacyStock));
+      } catch (error) {
+        logRealtimeDev('Falha ao sincronizar estoque por evento realtime.', error);
+      }
+    };
+
+    const syncRoutesFromRealtime = async () => {
+      try {
+        const [todayRoutesResult, routesResult] = await Promise.allSettled([
+          getTodayRoutes(),
+          getRoutes(),
+        ]);
+
+        if (!active) {
+          return;
+        }
+
+        if (todayRoutesResult.status === 'fulfilled') {
+          setTodayRoute(todayRoutesResult.value);
+          setSelectedRouteId(current => current || todayRoutesResult.value[0]?.id || '');
+        }
+
+        if (routesResult.status === 'fulfilled') {
+          setRouteHistory(routesResult.value);
+          setSelectedRouteId(current => current || routesResult.value[0]?.id || '');
+        }
+      } catch (error) {
+        logRealtimeDev('Falha ao sincronizar rotas por evento realtime.', error);
+      }
+    };
+
+    const disconnectRealtime = connectRealtime({
+      onOpen: () => {
+        setIsRealtimeConnected(true);
+        logRealtimeDev('Realtime conectado.');
+      },
+      onClose: () => {
+        setIsRealtimeConnected(false);
+        logRealtimeDev('Realtime desconectado.');
+      },
+      onError: (error) => {
+        setIsRealtimeConnected(false);
+        logRealtimeDev('Erro no realtime.', error);
+      },
+      onEvent: (event: RealtimeEvent) => {
+        const normalizedType = String(event.type ?? '').toUpperCase();
+
+        if (!normalizedType) {
+          return;
+        }
+
+        logRealtimeDev('Evento recebido:', normalizedType, event);
+
+        if (
+          normalizedType === 'ORDER_CREATED' ||
+          normalizedType === 'ORDER_UPDATED' ||
+          normalizedType === 'ORDER_STATUS_CHANGED'
+        ) {
+          void syncOrdersFromRealtime();
+          return;
+        }
+
+        if (normalizedType === 'INVENTORY_UPDATED') {
+          void syncInventoryFromRealtime();
+          return;
+        }
+
+        if (normalizedType === 'ROUTE_UPDATED' || normalizedType === 'DELIVERY_UPDATED') {
+          void syncRoutesFromRealtime();
+        }
+      },
+    });
+
+    return () => {
+      active = false;
+      disconnectRealtime();
+    };
+  }, [supplierId]);
+
+  useEffect(() => {
+    if (!isValidApiId(supplierId)) {
+      setSupplierProfile(null);
+      setSupplierProfileError('');
+      setSupplierDraft({
+        companyName: companyName || '',
+        companyEmail: currentUserProfile?.email ?? '',
+        address: '',
+        phone: '',
+        cnpj: '',
+      });
+      return;
+    }
+
+    let active = true;
+
+    const loadSupplierProfile = async () => {
+      setIsLoadingSupplierProfile(true);
+      setSupplierProfileError('');
+
+      try {
+        const supplier = await getSupplierById(supplierId);
+        if (!active) {
+          return;
+        }
+
+        setSupplierProfile(supplier);
+        setSupplierDraft({
+          companyName: typeof supplier.companyName === 'string' ? supplier.companyName : companyName,
+          companyEmail: typeof supplier.companyEmail === 'string' ? supplier.companyEmail : (currentUserProfile?.email ?? ''),
+          address: typeof supplier.address === 'string' ? supplier.address : '',
+          phone: typeof supplier.phone === 'string' ? supplier.phone : '',
+          cnpj: typeof supplier.cnpj === 'string' ? supplier.cnpj : '',
+        });
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        setSupplierProfile(null);
+        setSupplierProfileError('Não foi possível carregar os dados do fornecedor.');
+      } finally {
+        if (active) {
+          setIsLoadingSupplierProfile(false);
+        }
+      }
+    };
+
+    void loadSupplierProfile();
+
+    return () => {
+      active = false;
+    };
+  }, [companyName, currentUserProfile?.email, supplierId]);
 
   useEffect(() => {
     if (!usingMockFallback) {
@@ -252,12 +657,16 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
   const dashboardKpis = useMemo(() => {
     const source = dashboardReport as Record<string, unknown> | null;
-    const revenueToday = getNumberValue(source, ['totalRevenue', 'faturamentoTotal', 'revenueToday'], fallbackKpis.revenueToday);
-    const totalOrders = getNumberValue(source, ['totalOrders', 'pedidosTotal'], fallbackKpis.totalOrders);
-    const pendingOrders = getNumberValue(source, ['pendingOrders', 'pedidosPendentes'], fallbackKpis.pendingOrders);
+    const revenueToday = getNumberValue(source, ['billedToday', 'totalRevenue', 'faturamentoTotal', 'revenueToday'], fallbackKpis.revenueToday);
+    const totalOrders = getNumberValue(source, ['openOrders', 'totalOrders', 'pedidosTotal'], fallbackKpis.totalOrders);
+    const pendingOrders = getNumberValue(source, ['newOrders', 'pendingOrders', 'pedidosPendentes'], fallbackKpis.pendingOrders);
     const preparingOrders = getNumberValue(source, ['preparingOrders', 'pedidosEmSeparacao'], fallbackKpis.preparingOrders);
     const acceptanceRate = getNumberValue(source, ['acceptanceRate', 'taxaAceite'], fallbackKpis.acceptanceRate);
     const lowStockCount = getNumberValue(source, ['lowStockCount', 'estoqueBaixo'], fallbackKpis.lowStockCount);
+    const availableUnits = getNumberValue(source, ['availableUnits'], fallbackKpis.totalOrders);
+    const confirmedPayments = getNumberValue(source, ['confirmedPayments'], 0);
+    void availableUnits;
+    void confirmedPayments;
 
     const rawTopProducts = source?.topProducts;
     const mappedTopProducts = Array.isArray(rawTopProducts)
@@ -283,26 +692,495 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     };
   }, [dashboardReport, fallbackKpis]);
 
-  const reportSummary = useMemo(() => {
-    const accepted = overviewOrders.filter(order => !['RECUSADO', 'REJEITADO', 'CANCELADO'].includes(order.status)).length;
-    const rejected = overviewOrders.filter(order => ['RECUSADO', 'REJEITADO', 'CANCELADO'].includes(order.status)).length;
-    const preparing = overviewOrders.filter(order => order.status === 'EM_SEPARACAO').length;
-    const revenue = overviewOrders
-      .filter(order => !['RECUSADO', 'REJEITADO', 'CANCELADO'].includes(order.status))
-      .reduce((sum, order) => sum + order.valorTotal, 0);
+  const isReportsView = activeOverviewTab === 'RELATORIOS' || activeSection === 'RELATORIOS';
 
-    return { accepted, rejected, preparing, revenue };
-  }, [overviewOrders]);
+  const salesRevenue = useMemo(() => {
+    const raw = Number(salesReport?.totalRevenue ?? 0);
+    return Number.isFinite(raw) ? raw : 0;
+  }, [salesReport]);
+
+  const salesOrders = useMemo(() => {
+    const raw = Number(salesReport?.totalOrders ?? 0);
+    return Number.isFinite(raw) ? raw : 0;
+  }, [salesReport]);
+
+  const acceptanceRateValue = useMemo(() => {
+    const raw = Number(acceptanceRateReport?.acceptanceRate ?? 0);
+    return Number.isFinite(raw) ? raw : 0;
+  }, [acceptanceRateReport]);
+
+  const mappedTopProducts = useMemo(() => {
+    const normalized = topProductsReport.map((item, index) => {
+      const label = String(item.productName ?? item.name ?? `Produto ${index + 1}`);
+      const quantity = Number(item.quantitySold ?? 0);
+      const revenue = Number(item.totalRevenue ?? 0);
+
+      return {
+        key: `${label}-${index}`,
+        label,
+        quantity: Number.isFinite(quantity) ? quantity : 0,
+        revenue: Number.isFinite(revenue) ? revenue : 0,
+      };
+    });
+
+    const maxQuantity = normalized.reduce((max, current) => Math.max(max, current.quantity), 0);
+
+    return normalized.map(item => ({
+      ...item,
+      percent: maxQuantity > 0 ? Math.max(8, Math.round((item.quantity / maxQuantity) * 100)) : 0,
+    }));
+  }, [topProductsReport]);
+
+  const hasSalesData = salesRevenue > 0 || salesOrders > 0 || Array.isArray(salesReport?.series) && salesReport.series.length > 0;
+  const hasTopProductsData = mappedTopProducts.length > 0;
+  const hasAcceptanceDetails = Number(acceptanceRateReport?.totalOrders ?? 0) > 0;
 
   const deliveriesToday = useMemo(() => {
     return overviewOrders.filter(order => order.status === 'SAIU_PARA_ENTREGA' || order.status === 'ENTREGUE');
   }, [overviewOrders]);
+
+  useEffect(() => {
+    if (!isReportsView || hasLoadedReports) {
+      return;
+    }
+
+    let active = true;
+
+    const loadReportsData = async () => {
+      setIsLoadingReports(true);
+      setReportsError('');
+      setReportsWarning('');
+
+      const [salesResult, topProductsResult, acceptanceResult] = await Promise.allSettled([
+        getSalesReport(),
+        getTopProductsReport(),
+        getAcceptanceRateReport(),
+      ]);
+
+      if (!active) {
+        return;
+      }
+
+      let successCount = 0;
+
+      if (salesResult.status === 'fulfilled') {
+        setSalesReport(salesResult.value);
+        successCount += 1;
+      } else {
+        setSalesReport(null);
+      }
+
+      if (topProductsResult.status === 'fulfilled') {
+        setTopProductsReport(topProductsResult.value);
+        successCount += 1;
+      } else {
+        setTopProductsReport([]);
+      }
+
+      if (acceptanceResult.status === 'fulfilled') {
+        setAcceptanceRateReport(acceptanceResult.value);
+        successCount += 1;
+      } else {
+        setAcceptanceRateReport(null);
+      }
+
+      if (successCount === 0) {
+        setReportsError('Não foi possível carregar os relatórios.');
+      } else if (successCount < 3) {
+        setReportsWarning('Algumas informações de relatório ainda não estão disponíveis.');
+      }
+
+      setHasLoadedReports(true);
+      setIsLoadingReports(false);
+    };
+
+    void loadReportsData();
+
+    return () => {
+      active = false;
+    };
+  }, [hasLoadedReports, isReportsView]);
+
+  const highlightedProductId = useMemo(() => {
+    const firstInventoryItem = apiInventory.find(item => isValidApiId(item.productId));
+    return firstInventoryItem?.productId ?? '';
+  }, [apiInventory]);
+
+  const getReviewsErrorMessage = (error: unknown): string => {
+    if (error instanceof ApiError) {
+      if (error.status === 403) {
+        return 'Você não tem permissão para acessar avaliações.';
+      }
+
+      if (error.status >= 500) {
+        return 'Erro interno ao carregar avaliações.';
+      }
+
+      if (error.status === 404) {
+        return 'Nenhuma avaliação encontrada.';
+      }
+    }
+
+    return 'Não foi possível carregar as avaliações.';
+  };
+
+  useEffect(() => {
+    if (!isReportsView || hasLoadedSupplierReviews) {
+      return;
+    }
+
+    let active = true;
+
+    const loadSupplierReviews = async () => {
+      setIsLoadingSupplierReviews(true);
+      setSupplierReviewsError('');
+
+      if (!isValidApiId(supplierId)) {
+        if (!active) {
+          return;
+        }
+
+        setSupplierReviews([]);
+        setSupplierRatingSummary(EMPTY_RATING_SUMMARY);
+        setHasLoadedSupplierReviews(true);
+        setIsLoadingSupplierReviews(false);
+        return;
+      }
+
+      const [reviewsResult, summaryResult] = await Promise.allSettled([
+        getSupplierReviews(supplierId),
+        getSupplierRatingSummary(supplierId),
+      ]);
+
+      if (!active) {
+        return;
+      }
+
+      if (reviewsResult.status === 'fulfilled') {
+        setSupplierReviews(reviewsResult.value);
+      } else {
+        setSupplierReviews([]);
+      }
+
+      if (summaryResult.status === 'fulfilled') {
+        setSupplierRatingSummary(summaryResult.value);
+      } else {
+        setSupplierRatingSummary(EMPTY_RATING_SUMMARY);
+      }
+
+      if (reviewsResult.status === 'rejected' && summaryResult.status === 'rejected') {
+        setSupplierReviewsError(getReviewsErrorMessage(reviewsResult.reason));
+      }
+
+      setHasLoadedSupplierReviews(true);
+      setIsLoadingSupplierReviews(false);
+    };
+
+    void loadSupplierReviews();
+
+    return () => {
+      active = false;
+    };
+  }, [hasLoadedSupplierReviews, isReportsView, supplierId]);
+
+  useEffect(() => {
+    if (!isReportsView) {
+      return;
+    }
+
+    let active = true;
+
+    const loadHighlightedProductReviews = async () => {
+      setIsLoadingHighlightedProductReviews(true);
+      setHighlightedProductReviewsError('');
+
+      if (!isValidApiId(highlightedProductId)) {
+        if (!active) {
+          return;
+        }
+
+        setHighlightedProductReviews([]);
+        setHighlightedProductRatingSummary(EMPTY_RATING_SUMMARY);
+        setIsLoadingHighlightedProductReviews(false);
+        return;
+      }
+
+      const [reviewsResult, summaryResult] = await Promise.allSettled([
+        getProductReviews(highlightedProductId),
+        getProductRatingSummary(highlightedProductId),
+      ]);
+
+      if (!active) {
+        return;
+      }
+
+      if (reviewsResult.status === 'fulfilled') {
+        setHighlightedProductReviews(reviewsResult.value);
+      } else {
+        setHighlightedProductReviews([]);
+      }
+
+      if (summaryResult.status === 'fulfilled') {
+        setHighlightedProductRatingSummary(summaryResult.value);
+      } else {
+        setHighlightedProductRatingSummary(EMPTY_RATING_SUMMARY);
+      }
+
+      if (reviewsResult.status === 'rejected' && summaryResult.status === 'rejected') {
+        setHighlightedProductReviewsError(getReviewsErrorMessage(reviewsResult.reason));
+      }
+
+      setIsLoadingHighlightedProductReviews(false);
+    };
+
+    void loadHighlightedProductReviews();
+
+    return () => {
+      active = false;
+    };
+  }, [highlightedProductId, isReportsView]);
+
+  useEffect(() => {
+    setHasLoadedSupplierReviews(false);
+  }, [supplierId]);
+
+  const handleExportOrdersReport = async () => {
+    setIsExportingOrdersReport(true);
+    setReportExportError('');
+    setReportExportMessage('');
+
+    try {
+      exportOrdersToXlsx(apiOrders);
+
+      setReportExportMessage(
+        apiOrders.length === 0
+          ? 'Relatório vazio exportado com sucesso.'
+          : 'Relatório de pedidos exportado com sucesso.',
+      );
+    } catch (error) {
+      void error;
+      setReportExportError('Não foi possível exportar o relatório de pedidos.');
+    } finally {
+      setIsExportingOrdersReport(false);
+    }
+  };
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('pt-BR', {
       style: 'currency',
       currency: 'BRL',
     }).format(value);
+  };
+
+  const formatReviewDate = (rawDate?: string): string => {
+    if (!rawDate) {
+      return 'Data não informada';
+    }
+
+    const parsed = new Date(rawDate);
+    if (Number.isNaN(parsed.getTime())) {
+      return 'Data não informada';
+    }
+
+    return new Intl.DateTimeFormat('pt-BR', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+    }).format(parsed);
+  };
+
+  const displayCompanyName = useMemo(() => {
+    if (typeof supplierProfile?.companyName === 'string' && supplierProfile.companyName.trim()) {
+      return supplierProfile.companyName;
+    }
+
+    if (companyName.trim()) {
+      return companyName;
+    }
+
+    if (typeof currentUserProfile?.companyName === 'string' && currentUserProfile.companyName.trim()) {
+      return currentUserProfile.companyName;
+    }
+
+    if (typeof currentUserProfile?.empresaNome === 'string' && currentUserProfile.empresaNome.trim()) {
+      return currentUserProfile.empresaNome;
+    }
+
+    if (typeof currentUserProfile?.name === 'string' && currentUserProfile.name.trim()) {
+      return currentUserProfile.name;
+    }
+
+    return 'Fornecedor';
+  }, [companyName, currentUserProfile, supplierProfile]);
+
+  const canEditSupplier = isValidApiId(supplierId) && supplierProfile !== null;
+  const handleSupplierDraftChange = (field: keyof SupplierDraft, value: string) => {
+    setSupplierDraft(current => ({
+      ...current,
+      [field]: value,
+    }));
+    setSupplierSaveMessage('');
+    setSupplierSaveError('');
+  };
+
+  const handleSaveSupplierProfile = async () => {
+    if (!canEditSupplier) {
+      setSupplierSaveError('Edição indisponível no momento.');
+      return;
+    }
+
+    setIsSavingSupplier(true);
+    setSupplierSaveError('');
+    setSupplierSaveMessage('');
+
+    try {
+      const payload = {
+        companyName: supplierDraft.companyName.trim(),
+        companyEmail: supplierDraft.companyEmail.trim(),
+        address: supplierDraft.address.trim(),
+        phone: supplierDraft.phone.trim(),
+        cnpj: supplierDraft.cnpj.trim(),
+      };
+
+      const updatedSupplier = await updateSupplier(supplierId, payload);
+      setSupplierProfile(updatedSupplier);
+      setSupplierDraft({
+        companyName: typeof updatedSupplier.companyName === 'string' ? updatedSupplier.companyName : payload.companyName,
+        companyEmail: typeof updatedSupplier.companyEmail === 'string' ? updatedSupplier.companyEmail : payload.companyEmail,
+        address: typeof updatedSupplier.address === 'string' ? updatedSupplier.address : payload.address,
+        phone: typeof updatedSupplier.phone === 'string' ? updatedSupplier.phone : payload.phone,
+        cnpj: typeof updatedSupplier.cnpj === 'string' ? updatedSupplier.cnpj : payload.cnpj,
+      });
+      setSupplierSaveMessage('Dados do fornecedor atualizados com sucesso.');
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 403) {
+        setSupplierSaveError('Você não tem permissão para atualizar o fornecedor.');
+      } else if (error instanceof ApiError && error.status === 404) {
+        setSupplierSaveError('Fornecedor não encontrado para atualização.');
+      } else {
+        setSupplierSaveError('Não foi possível salvar os dados do fornecedor.');
+      }
+    } finally {
+      setIsSavingSupplier(false);
+    }
+  };
+
+  const recentSupplierReviews = useMemo(() => {
+    return [...supplierReviews]
+      .sort((a, b) => {
+        const aTime = new Date(String(a.createdAt ?? '')).getTime();
+        const bTime = new Date(String(b.createdAt ?? '')).getTime();
+        return bTime - aTime;
+      })
+      .slice(0, 3);
+  }, [supplierReviews]);
+
+  const recentHighlightedProductReviews = useMemo(() => {
+    return [...highlightedProductReviews]
+      .sort((a, b) => {
+        const aTime = new Date(String(a.createdAt ?? '')).getTime();
+        const bTime = new Date(String(b.createdAt ?? '')).getTime();
+        return bTime - aTime;
+      })
+      .slice(0, 2);
+  }, [highlightedProductReviews]);
+
+  const supplierAverageRating = Number(supplierRatingSummary.averageRating ?? 0);
+  const supplierTotalReviews = Number(supplierRatingSummary.totalReviews ?? supplierReviews.length);
+  const highlightedProductAverageRating = Number(highlightedProductRatingSummary.averageRating ?? 0);
+  const highlightedProductTotalReviews = Number(highlightedProductRatingSummary.totalReviews ?? highlightedProductReviews.length);
+
+  const renderReviewsInsights = () => {
+    return (
+      <div className="mt-8 grid grid-cols-1 xl:grid-cols-2 gap-5">
+        <div className="rounded-lg border border-[#222222] bg-[#181818] p-5 light:border-gray-200 light:bg-gray-50">
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-white dark:text-white light:text-gray-900">Avaliação do fornecedor</h3>
+              <p className="mt-1 text-xs text-gray-500 light:text-gray-600">Média atual e comentários recentes</p>
+            </div>
+            <span className="rounded-full bg-[#00ff66]/15 px-3 py-1 text-xs font-semibold text-[#00ff66] light:bg-green-100 light:text-green-700">
+              {supplierAverageRating.toFixed(1)} / 5
+            </span>
+          </div>
+
+          <p className="mb-4 text-xs text-gray-500 light:text-gray-600">Total de avaliações: {supplierTotalReviews}</p>
+
+          {isLoadingSupplierReviews && (
+            <p className="text-xs text-gray-500 light:text-gray-600">Carregando avaliações...</p>
+          )}
+
+          {!isLoadingSupplierReviews && supplierReviewsError && (
+            <p className="text-xs text-amber-300 light:text-amber-700">{supplierReviewsError}</p>
+          )}
+
+          {!isLoadingSupplierReviews && !supplierReviewsError && recentSupplierReviews.length === 0 && (
+            <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma avaliação recebida ainda.</p>
+          )}
+
+          {!isLoadingSupplierReviews && !supplierReviewsError && recentSupplierReviews.length > 0 && (
+            <div className="space-y-3">
+              {recentSupplierReviews.map(review => (
+                <div key={review.id} className="rounded-md border border-[#262626] bg-[#121212] p-3 light:border-gray-200 light:bg-white">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-amber-300 light:text-amber-700">
+                      Nota {Number(review.rating ?? 0).toFixed(1)} / 5
+                    </span>
+                    <span className="text-[11px] text-gray-500 light:text-gray-600">{formatReviewDate(typeof review.createdAt === 'string' ? review.createdAt : undefined)}</span>
+                  </div>
+                  <p className="text-sm text-gray-300 light:text-gray-700">
+                    {typeof review.comment === 'string' && review.comment.trim() ? review.comment : 'Sem comentário.'}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-[#222222] bg-[#181818] p-5 light:border-gray-200 light:bg-gray-50">
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-white dark:text-white light:text-gray-900">Avaliação de produto em destaque</h3>
+              <p className="mt-1 text-xs text-gray-500 light:text-gray-600">Resumo do primeiro produto com estoque disponível</p>
+            </div>
+            <span className="rounded-full bg-sky-500/15 px-3 py-1 text-xs font-semibold text-sky-300 light:bg-sky-100 light:text-sky-700">
+              {highlightedProductAverageRating.toFixed(1)} / 5
+            </span>
+          </div>
+
+          <p className="mb-4 text-xs text-gray-500 light:text-gray-600">Total de avaliações: {highlightedProductTotalReviews}</p>
+
+          {isLoadingHighlightedProductReviews && (
+            <p className="text-xs text-gray-500 light:text-gray-600">Carregando avaliações do produto...</p>
+          )}
+
+          {!isLoadingHighlightedProductReviews && highlightedProductReviewsError && (
+            <p className="text-xs text-amber-300 light:text-amber-700">{highlightedProductReviewsError}</p>
+          )}
+
+          {!isLoadingHighlightedProductReviews && !highlightedProductReviewsError && recentHighlightedProductReviews.length === 0 && (
+            <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma avaliação encontrada.</p>
+          )}
+
+          {!isLoadingHighlightedProductReviews && !highlightedProductReviewsError && recentHighlightedProductReviews.length > 0 && (
+            <div className="space-y-3">
+              {recentHighlightedProductReviews.map(review => (
+                <div key={review.id} className="rounded-md border border-[#262626] bg-[#121212] p-3 light:border-gray-200 light:bg-white">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-amber-300 light:text-amber-700">
+                      Nota {Number(review.rating ?? 0).toFixed(1)} / 5
+                    </span>
+                    <span className="text-[11px] text-gray-500 light:text-gray-600">{formatReviewDate(typeof review.createdAt === 'string' ? review.createdAt : undefined)}</span>
+                  </div>
+                  <p className="text-sm text-gray-300 light:text-gray-700">
+                    {typeof review.comment === 'string' && review.comment.trim() ? review.comment : 'Sem comentário.'}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
   };
 
   const registerStockMovements = (newMovements: Array<Omit<StockMovement, 'id' | 'createdAt'>>) => {
@@ -422,9 +1300,255 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     ));
   }, [overviewOrders]);
 
+  const routeGenerationContext = useMemo(() => {
+    const stops: GenerateRouteStop[] = [];
+    let missingCoordinatesCount = 0;
+
+    for (const order of deliveryOrders) {
+      const source = order as unknown as Record<string, unknown>;
+      const latitudeCandidate = source.latitude ?? source.lat ?? source.deliveryLatitude;
+      const longitudeCandidate = source.longitude ?? source.lng ?? source.deliveryLongitude;
+      const latitude = typeof latitudeCandidate === 'number' ? latitudeCandidate : Number(latitudeCandidate);
+      const longitude = typeof longitudeCandidate === 'number' ? longitudeCandidate : Number(longitudeCandidate);
+
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !isValidApiId(order.id)) {
+        missingCoordinatesCount += 1;
+        continue;
+      }
+
+      stops.push({
+        orderId: order.id,
+        latitude,
+        longitude,
+      });
+    }
+
+    return {
+      stops,
+      missingCoordinatesCount,
+    };
+  }, [deliveryOrders]);
+
+  const canGenerateRoute = selectedDriverId.trim().length > 0 && routeGenerationContext.stops.length > 0;
+
   const completedDeliveries = useMemo(() => {
     return deliveryOrders.filter(order => order.status === 'ENTREGUE').length;
   }, [deliveryOrders]);
+
+  const refreshRoutesData = async () => {
+    const [todayRoutesResult, routesResult] = await Promise.allSettled([
+      getTodayRoutes(),
+      getRoutes(),
+    ]);
+
+    if (todayRoutesResult.status === 'fulfilled') {
+      setTodayRoute(todayRoutesResult.value);
+      if (!selectedRouteId && todayRoutesResult.value[0]?.id) {
+        setSelectedRouteId(todayRoutesResult.value[0].id);
+      }
+    }
+
+    if (routesResult.status === 'fulfilled') {
+      setRouteHistory(routesResult.value);
+      if (!selectedRouteId && routesResult.value[0]?.id) {
+        setSelectedRouteId(routesResult.value[0].id);
+      }
+    }
+  };
+
+  const setRouteErrorFromApi = (error: unknown) => {
+    if (error instanceof ApiError && error.status === 403) {
+      setRouteActionError('Você não tem permissão para executar esta ação.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status === 404) {
+      setRouteActionError('Registro não encontrado no backend.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status === 409) {
+      setRouteActionError('Esta ação não pode ser executada no status atual.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status >= 500) {
+      setRouteActionError('Erro interno ao atualizar rota/entrega. Tente novamente em instantes.');
+      return;
+    }
+
+    setRouteActionError('Erro ao executar ação de rota/entrega.');
+  };
+
+  const handleGenerateRoute = async () => {
+    if (!canGenerateRoute) {
+      setRouteActionError('Para gerar uma rota, selecione um entregador e ao menos uma entrega com localização.');
+      return;
+    }
+
+    setIsSyncingRouteAction('generate');
+    setRouteActionError('');
+
+    try {
+      const createdRoute = await generateRoute({
+        driverId: selectedDriverId,
+        stops: routeGenerationContext.stops,
+      });
+      setRouteActionFeedback('Rota gerada com sucesso.');
+      setTodayRoute(current => [createdRoute, ...current.filter(route => route.id !== createdRoute.id)]);
+      setRouteHistory(current => [createdRoute, ...current.filter(route => route.id !== createdRoute.id)]);
+      setSelectedRouteId(createdRoute.id);
+      await refreshRoutesData();
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  const handleStartRoute = async (routeId?: string) => {
+    if (!isValidApiId(routeId)) {
+      setRouteActionError('Registro sem ID real: ação simulada localmente.');
+      return;
+    }
+
+    const validRouteId = routeId as string;
+
+    setIsSyncingRouteAction(`start:${validRouteId}`);
+    setRouteActionError('');
+
+    try {
+      const updatedRoute = await startRoute(validRouteId);
+      setRouteActionFeedback('Rota iniciada com sucesso.');
+      setTodayRoute(current => current.map(route => route.id === validRouteId ? { ...route, ...updatedRoute } : route));
+      setRouteHistory(current => current.map(route => route.id === validRouteId ? { ...route, ...updatedRoute } : route));
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  const handleCompleteRoute = async (routeId?: string) => {
+    if (!isValidApiId(routeId)) {
+      setRouteActionError('Registro sem ID real: ação simulada localmente.');
+      return;
+    }
+
+    const validRouteId = routeId as string;
+
+    setIsSyncingRouteAction(`complete:${validRouteId}`);
+    setRouteActionError('');
+
+    try {
+      const updatedRoute = await completeRoute(validRouteId);
+      setRouteActionFeedback('Rota concluída com sucesso.');
+      setTodayRoute(current => current.map(route => route.id === validRouteId ? { ...route, ...updatedRoute } : route));
+      setRouteHistory(current => current.map(route => route.id === validRouteId ? { ...route, ...updatedRoute } : route));
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  const handleArrivePoint = async (pointId?: string) => {
+    if (!isValidApiId(pointId)) {
+      setRouteActionError('Registro sem ID real: ação simulada localmente.');
+      return;
+    }
+
+    const validPointId = pointId as string;
+
+    setIsSyncingRouteAction(`arrive:${validPointId}`);
+    setRouteActionError('');
+
+    try {
+      const updatedPoint = await arriveDeliveryPoint(validPointId, {});
+      setSelectedRoutePoints(current => current.map(point => point.id === validPointId ? { ...point, ...updatedPoint } : point));
+      setRouteActionFeedback('Chegada registrada com sucesso.');
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  const handleSendProof = async (pointId?: string) => {
+    if (!isValidApiId(pointId)) {
+      setRouteActionError('Registro sem ID real: ação simulada localmente.');
+      return;
+    }
+
+    const validPointId = pointId as string;
+
+    setIsSyncingRouteAction(`proof:${validPointId}`);
+    setRouteActionError('');
+
+    try {
+      const updatedPoint = await sendDeliveryProof(validPointId, { proof: 'Entrega confirmada no painel web' });
+      setSelectedRoutePoints(current => current.map(point => point.id === validPointId ? { ...point, ...updatedPoint } : point));
+      setRouteActionFeedback('Prova de entrega enviada com sucesso.');
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  const handleFailPoint = async (pointId?: string) => {
+    if (!isValidApiId(pointId)) {
+      setRouteActionError('Registro sem ID real: ação simulada localmente.');
+      return;
+    }
+
+    const validPointId = pointId as string;
+
+    setIsSyncingRouteAction(`fail:${validPointId}`);
+    setRouteActionError('');
+
+    try {
+      const updatedPoint = await failDeliveryPoint(validPointId, { reason: 'Falha registrada no painel web' });
+      setSelectedRoutePoints(current => current.map(point => point.id === validPointId ? { ...point, ...updatedPoint } : point));
+      setRouteActionFeedback('Falha de entrega registrada com sucesso.');
+    } catch (error) {
+      setRouteErrorFromApi(error);
+    } finally {
+      setIsSyncingRouteAction('');
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedRouteId || !isValidApiId(selectedRouteId)) {
+      setSelectedRoutePoints([]);
+      return;
+    }
+
+    let active = true;
+
+    const loadRoutePoints = async () => {
+      try {
+        const points = await getRoutePoints(selectedRouteId);
+        if (!active) {
+          return;
+        }
+
+        setSelectedRoutePoints(points);
+      } catch {
+        if (!active) {
+          return;
+        }
+
+        setSelectedRoutePoints([]);
+      }
+    };
+
+    void loadRoutePoints();
+
+    return () => {
+      active = false;
+    };
+  }, [selectedRouteId]);
 
   const renderOverviewContent = () => {
     if (activeOverviewTab === 'PEDIDOS') {
@@ -496,22 +1620,11 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     if (activeOverviewTab === 'ESTOQUE') {
       return (
         <section className="space-y-6">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-5 py-4">
-            <div className="flex items-center gap-3">
-              <span className="h-2.5 w-2.5 rounded-full bg-[#00ff66]" />
-              <p className="text-sm font-semibold leading-6 text-[#00ff66]">
-                {stockNotice}
-                {dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setActiveOverviewTab('PEDIDOS')}
-              className="w-fit rounded-md bg-[#00ff66] px-4 py-2 text-xs font-bold text-black transition-colors hover:bg-[#22ff7a]"
-            >
-              Ver pedido →
-            </button>
-          </div>
+          <NewOrderBanner
+            message={`${stockNotice}${dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}`}
+            onViewOrder={() => setActiveOverviewTab('PEDIDOS')}
+            className="px-5 py-4 gap-4"
+          />
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
             <div className="rounded-xl border border-[#222222] bg-[#151515] p-4 light:border-gray-200 light:bg-white">
@@ -641,22 +1754,10 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     if (activeOverviewTab === 'ENTREGAS') {
       return (
         <section className="space-y-4">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span className="h-2.5 w-2.5 rounded-full bg-[#00ff66]" />
-              <p className="text-sm font-semibold text-[#00ff66]">
-                {stockNotice}
-                {dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setActiveOverviewTab('PEDIDOS')}
-              className="w-fit rounded-md bg-[#00ff66] px-4 py-2 text-xs font-bold text-black transition-colors hover:bg-[#22ff7a]"
-            >
-              Ver pedido →
-            </button>
-          </div>
+          <NewOrderBanner
+            message={`${stockNotice}${dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}`}
+            onViewOrder={() => setActiveOverviewTab('PEDIDOS')}
+          />
 
           <div className="rounded-xl border border-[#222222] bg-[#151515] p-4 light:border-gray-200 light:bg-white">
             <div className="mb-4 flex items-center justify-between">
@@ -718,63 +1819,93 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     if (activeOverviewTab === 'RELATORIOS') {
       return (
         <section className="space-y-4">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 rounded-xl border border-emerald-500/25 bg-emerald-500/10 px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span className="h-2.5 w-2.5 rounded-full bg-[#00ff66]" />
-              <p className="text-sm font-semibold text-[#00ff66]">
-                {stockNotice}
-                {dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setActiveOverviewTab('PEDIDOS')}
-              className="w-fit rounded-md bg-[#00ff66] px-4 py-2 text-xs font-bold text-black transition-colors hover:bg-[#22ff7a]"
-            >
-              Ver pedido →
-            </button>
-          </div>
+          <NewOrderBanner
+            message={`${stockNotice}${dispatchOrder ? ` - ${formatCurrency(dispatchOrder.valorTotal)}` : ''}`}
+            onViewOrder={() => setActiveOverviewTab('PEDIDOS')}
+          />
 
           <div className="rounded-xl border border-[#222222] bg-[#151515] p-6 md:p-8 light:border-gray-200 light:bg-white">
             <div className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <h2 className="text-base font-semibold !text-white dark:!text-white light:!text-gray-900">Relatório de desempenho</h2>
-              <button type="button" className="text-xs font-bold text-[#00ff66]">Ver completo</button>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleExportOrdersReport();
+                }}
+                disabled={isExportingOrdersReport}
+                className="text-xs font-bold text-[#00ff66] disabled:opacity-60"
+              >
+                {isExportingOrdersReport ? 'Exportando...' : 'Exportar pedidos'}
+              </button>
             </div>
+
+            {isLoadingReports && (
+              <p className="mb-4 text-xs text-gray-500 light:text-gray-600">Carregando relatórios...</p>
+            )}
+
+            {reportsError && (
+              <p className="mb-4 text-xs text-amber-300 light:text-amber-700">{reportsError}</p>
+            )}
+
+            {!reportsError && reportsWarning && (
+              <p className="mb-4 text-xs text-amber-300 light:text-amber-700">{reportsWarning}</p>
+            )}
+
+            {reportExportMessage && (
+              <p className="mb-4 text-xs text-[#00ff66] light:text-green-700">{reportExportMessage}</p>
+            )}
+
+            {reportExportError && (
+              <p className="mb-4 text-xs text-amber-300 light:text-amber-700">{reportExportError}</p>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
               <div className="rounded-lg bg-[#181818] p-6 light:bg-gray-50">
                 <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">
-                  {formatCurrency(dashboardKpis.revenueToday)}
+                  {hasSalesData ? formatCurrency(salesRevenue) : 'R$ 0,00'}
                 </h3>
                 <p className="mt-3 text-xs text-gray-500 light:text-gray-600">Faturado hoje</p>
               </div>
               <div className="rounded-lg bg-[#181818] p-6 light:bg-gray-50">
-                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{dashboardKpis.acceptanceRate}%</h3>
+                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{acceptanceRateValue}%</h3>
                 <p className="mt-3 text-xs text-gray-500 light:text-gray-600">Taxa de aceite</p>
+                {!hasAcceptanceDetails && (
+                  <p className="mt-2 text-xs text-gray-500 light:text-gray-600">Sem dados suficientes.</p>
+                )}
               </div>
               <div className="rounded-lg bg-[#181818] p-6 light:bg-gray-50">
-                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{dashboardKpis.monthlyOrders}</h3>
+                <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900">{salesOrders}</h3>
                 <p className="mt-3 text-xs text-gray-500 light:text-gray-600">Pedidos/mês</p>
               </div>
             </div>
 
+            {!hasSalesData && (
+              <p className="mt-4 text-xs text-gray-500 light:text-gray-600">Nenhum dado de venda disponível.</p>
+            )}
+
             <div className="mt-8 border-t border-[#222222] pt-7 light:border-gray-200">
               <p className="mb-5 text-xs uppercase tracking-wide text-gray-500 light:text-gray-600">Mais pedidos esta semana</p>
-              <div className="space-y-5">
-                {dashboardKpis.topProducts.map(product => (
-                  <div key={product.name} className="grid grid-cols-1 sm:grid-cols-[180px_1fr_52px] sm:items-center gap-2 sm:gap-5">
-                    <span className="truncate text-sm text-gray-400 light:text-gray-700">{product.name}</span>
-                    <div className="h-2.5 rounded-full bg-[#262626] light:bg-gray-200">
-                      <div
-                        className="h-2.5 rounded-full bg-[#00ff66]"
-                        style={{ width: `${Math.max(8, product.percent)}%` }}
-                      />
+              {hasTopProductsData ? (
+                <div className="space-y-5">
+                  {mappedTopProducts.map(product => (
+                    <div key={product.key} className="grid grid-cols-1 sm:grid-cols-[180px_1fr_52px] sm:items-center gap-2 sm:gap-5">
+                      <span className="truncate text-sm text-gray-400 light:text-gray-700">{product.label}</span>
+                      <div className="h-2.5 rounded-full bg-[#262626] light:bg-gray-200">
+                        <div
+                          className="h-2.5 rounded-full bg-[#00ff66]"
+                          style={{ width: `${product.percent}%` }}
+                        />
+                      </div>
+                      <span className="text-left text-xs text-gray-500 light:text-gray-600 sm:text-right">{product.quantity}</span>
                     </div>
-                    <span className="text-left text-xs text-gray-500 light:text-gray-600 sm:text-right">{product.percent}%</span>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500 light:text-gray-600">Nenhum produto vendido ainda.</p>
+              )}
             </div>
+
+            {renderReviewsInsights()}
           </div>
         </section>
       );
@@ -792,10 +1923,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
           { label: 'Saindo Hoje', value: String(dashboardKpis.deliveriesInProgress) },
           { label: 'Faturado (Mês)', value: formatCurrency(dashboardKpis.revenueToday) },
         ].map(card => (
-          <div key={card.label} className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
-            <p className="text-gray-500 light:text-gray-400 text-sm">{card.label}</p>
-            <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900 mt-1">{card.value}</h3>
-          </div>
+          <KpiCard key={card.label} label={card.label} value={card.value} />
         ))}
       </div>
     );
@@ -826,21 +1954,185 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     }
 
     if (activeSection === 'ENTREGAS') {
+      const todayPrimaryRoute = todayRoute[0];
+      const selectedRoute = routeHistory.find(route => route.id === selectedRouteId)
+        ?? todayRoute.find(route => route.id === selectedRouteId)
+        ?? todayPrimaryRoute;
+
       return (
-        <div className="mt-8 bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5">
-          <h2 className="text-lg font-semibold !text-white dark:!text-white light:!text-gray-900 mb-4">Lista de entregas</h2>
-          <div className="space-y-2">
-            {deliveriesToday.map(order => (
-              <div key={order.id} className="rounded-lg border border-[#2a2a2a] light:border-gray-200 p-3 flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{order.id} - {order.cliente}</p>
-                  <p className="text-xs text-gray-500">Entrega prevista: {order.dataDesejada}</p>
+        <div className="mt-8 space-y-5">
+          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3 mb-4">
+              <h2 className="text-lg font-semibold !text-white dark:!text-white light:!text-gray-900">Rota do dia</h2>
+              <button
+                type="button"
+                onClick={() => {
+                  void handleGenerateRoute();
+                }}
+                disabled={isSyncingRouteAction === 'generate' || !canGenerateRoute}
+                className="rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 px-3 py-2 text-xs font-semibold hover:bg-[#00ff66]/25 disabled:opacity-60 transition-colors"
+              >
+                Gerar rota
+              </button>
+            </div>
+
+            <p className="mb-3 text-xs text-gray-500 light:text-gray-600">
+              A geração de rota depende de um entregador e de entregas com coordenadas.
+            </p>
+
+            {routeGenerationContext.missingCoordinatesCount > 0 && (
+              <p className="mb-3 text-xs text-amber-300 light:text-amber-700">
+                Algumas entregas não possuem coordenadas e não podem entrar na rota.
+              </p>
+            )}
+
+            {!todayPrimaryRoute && (
+              <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma rota planejada para hoje.</p>
+            )}
+
+            {todayPrimaryRoute && (
+              <div className="rounded-lg border border-[#2a2a2a] light:border-gray-200 p-3 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm text-white dark:text-white light:text-gray-900 font-medium">{todayPrimaryRoute.id}</p>
+                  <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-400 light:bg-violet-100 light:text-violet-700">
+                    {getRouteStatusLabel(typeof todayPrimaryRoute.status === 'string' ? todayPrimaryRoute.status : undefined)}
+                  </span>
                 </div>
-                <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-400 light:bg-violet-100 light:text-violet-700">
-                  {order.status === 'ENTREGUE' ? 'Entregue' : 'Em rota'}
-                </span>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleStartRoute(todayPrimaryRoute.id);
+                    }}
+                    disabled={isSyncingRouteAction === `start:${todayPrimaryRoute.id}`}
+                    className="rounded-md border border-[#2a2a2a] light:border-gray-200 px-3 py-1.5 text-xs text-gray-300 light:text-gray-700 hover:bg-[#202020] light:hover:bg-gray-100 disabled:opacity-60 transition-colors"
+                  >
+                    Iniciar rota
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleCompleteRoute(todayPrimaryRoute.id);
+                    }}
+                    disabled={isSyncingRouteAction === `complete:${todayPrimaryRoute.id}`}
+                    className="rounded-md border border-[#2a2a2a] light:border-gray-200 px-3 py-1.5 text-xs text-gray-300 light:text-gray-700 hover:bg-[#202020] light:hover:bg-gray-100 disabled:opacity-60 transition-colors"
+                  >
+                    Concluir rota
+                  </button>
+                </div>
               </div>
-            ))}
+            )}
+
+            {routeActionFeedback && (
+              <p className="mt-3 text-xs text-[#00ff66] light:text-green-700">{routeActionFeedback}</p>
+            )}
+
+            {routeActionError && (
+              <p className="mt-2 text-xs text-amber-300 light:text-amber-700">{routeActionError}</p>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5">
+              <h3 className="text-base font-semibold !text-white dark:!text-white light:!text-gray-900 mb-4">Histórico de rotas</h3>
+              <div className="space-y-2 max-h-[260px] overflow-y-auto">
+                {routeHistory.map(route => (
+                  <button
+                    key={route.id}
+                    type="button"
+                    onClick={() => setSelectedRouteId(route.id)}
+                    className={`w-full text-left rounded-lg border p-3 transition-colors ${
+                      selectedRouteId === route.id
+                        ? 'border-[#00ff66]/40 bg-[#00ff66]/10 light:bg-green-100 light:border-green-300'
+                        : 'border-[#2a2a2a] light:border-gray-200 hover:bg-[#1a1a1a] light:hover:bg-gray-50'
+                    }`}
+                  >
+                    <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{route.id}</p>
+                    <p className="text-xs text-gray-500 light:text-gray-600 mt-1">
+                      {getRouteStatusLabel(typeof route.status === 'string' ? route.status : undefined)}
+                    </p>
+                  </button>
+                ))}
+
+                {routeHistory.length === 0 && (
+                  <p className="text-sm text-gray-500 light:text-gray-600">Nenhuma rota registrada.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5">
+              <h3 className="text-base font-semibold !text-white dark:!text-white light:!text-gray-900 mb-4">Pontos de entrega</h3>
+
+              {!selectedRoute && (
+                <p className="text-sm text-gray-500 light:text-gray-600">Selecione uma rota para visualizar os pontos.</p>
+              )}
+
+              {selectedRoute && selectedRoutePoints.length === 0 && (
+                <p className="text-sm text-gray-500 light:text-gray-600">Nenhum ponto de entrega encontrado para esta rota.</p>
+              )}
+
+              <div className="space-y-2 max-h-[320px] overflow-y-auto">
+                {selectedRoutePoints.map(point => (
+                  <div key={point.id} className="rounded-lg border border-[#2a2a2a] light:border-gray-200 p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm text-white dark:text-white light:text-gray-900">{point.address || point.id}</p>
+                      <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-400 light:bg-violet-100 light:text-violet-700">
+                        {getDeliveryPointStatusLabel(typeof point.status === 'string' ? point.status : undefined)}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleArrivePoint(point.id);
+                        }}
+                        disabled={isSyncingRouteAction === `arrive:${point.id}`}
+                        className="rounded-md border border-[#2a2a2a] light:border-gray-200 px-2.5 py-1 text-xs text-gray-300 light:text-gray-700 hover:bg-[#202020] light:hover:bg-gray-100 disabled:opacity-60 transition-colors"
+                      >
+                        Registrar chegada
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleSendProof(point.id);
+                        }}
+                        disabled={isSyncingRouteAction === `proof:${point.id}`}
+                        className="rounded-md border border-[#2a2a2a] light:border-gray-200 px-2.5 py-1 text-xs text-gray-300 light:text-gray-700 hover:bg-[#202020] light:hover:bg-gray-100 disabled:opacity-60 transition-colors"
+                      >
+                        Enviar prova
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleFailPoint(point.id);
+                        }}
+                        disabled={isSyncingRouteAction === `fail:${point.id}`}
+                        className="rounded-md border border-[#2a2a2a] light:border-gray-200 px-2.5 py-1 text-xs text-gray-300 light:text-gray-700 hover:bg-[#202020] light:hover:bg-gray-100 disabled:opacity-60 transition-colors"
+                      >
+                        Registrar falha
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-5">
+            <h2 className="text-lg font-semibold !text-white dark:!text-white light:!text-gray-900 mb-4">Lista de entregas</h2>
+            <div className="space-y-2">
+              {deliveriesToday.map(order => (
+                <div key={order.id} className="rounded-lg border border-[#2a2a2a] light:border-gray-200 p-3 flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{order.id} - {order.cliente}</p>
+                    <p className="text-xs text-gray-500">Entrega prevista: {order.dataDesejada}</p>
+                  </div>
+                  <span className="text-xs px-2 py-1 rounded-full bg-violet-500/20 text-violet-400 light:bg-violet-100 light:text-violet-700">
+                    {order.status === 'ENTREGUE' ? 'Entregue' : 'Em rota'}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       );
@@ -848,33 +2140,69 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
     if (activeSection === 'RELATORIOS') {
       return (
-        <div className="mt-8 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
-            <p className="text-gray-500 light:text-gray-400 text-sm">Pedidos Aceitos</p>
-            <h3 className="text-2xl font-bold text-emerald-400 light:text-emerald-700 mt-1">{reportSummary.accepted}</h3>
+        <div className="mt-8 space-y-4">
+          {isLoadingReports && (
+            <div className="rounded-xl border border-[#222222] light:border-gray-200 bg-[#0d0d0d] dark:bg-[#0d0d0d] light:bg-white p-4 text-sm text-gray-300 light:text-gray-700">
+              Carregando relatórios...
+            </div>
+          )}
+
+          {reportsError && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 light:bg-amber-100 light:text-amber-700">
+              {reportsError}
+            </div>
+          )}
+
+          {!reportsError && reportsWarning && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 light:bg-amber-100 light:text-amber-700">
+              {reportsWarning}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+            <KpiCard
+              label="Pedidos Aceitos"
+              value={acceptanceRateReport?.acceptedOrders ?? 0}
+              valueClassName="text-emerald-400 light:text-emerald-700"
+            />
+            <KpiCard
+              label="Pedidos Recusados"
+              value={acceptanceRateReport?.rejectedOrders ?? 0}
+              valueClassName="text-rose-400 light:text-rose-700"
+            />
+            <KpiCard
+              label="Em Separação"
+              value={dashboardReport?.preparingOrders ?? 0}
+              valueClassName="text-amber-400 light:text-amber-700"
+            />
+            <KpiCard label="Faturamento" value={formatCurrency(salesRevenue)} />
           </div>
-          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
-            <p className="text-gray-500 light:text-gray-400 text-sm">Pedidos Recusados</p>
-            <h3 className="text-2xl font-bold text-rose-400 light:text-rose-700 mt-1">{reportSummary.rejected}</h3>
-          </div>
-          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
-            <p className="text-gray-500 light:text-gray-400 text-sm">Em Separação</p>
-            <h3 className="text-2xl font-bold text-amber-400 light:text-amber-700 mt-1">{reportSummary.preparing}</h3>
-          </div>
-          <div className="bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 p-6 rounded-xl shadow-sm">
-            <p className="text-gray-500 light:text-gray-400 text-sm">Faturamento</p>
-            <h3 className="text-2xl font-bold text-white dark:text-white light:text-gray-900 mt-1">{formatCurrency(reportSummary.revenue)}</h3>
-          </div>
+
+          {renderReviewsInsights()}
         </div>
       );
     }
 
     if (activeSection === 'CONFIGURACOES') {
       return (
-        <div className="mt-8 bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-xl p-6">
-          <h2 className="text-lg font-semibold !text-white dark:!text-white light:!text-gray-900">Configurações da conta</h2>
-          <p className="text-sm text-gray-400 light:text-gray-600 mt-2">Em breve: notificações, integrações e preferências de operação.</p>
-        </div>
+        <SettingsProfileSection
+          theme={theme}
+          toggleTheme={toggleTheme}
+          onLogout={onLogout}
+          currentUser={currentUserProfile}
+          companyName={displayCompanyName}
+          supplierId={supplierId}
+          supplierProfile={supplierProfile}
+          isLoadingSupplierProfile={isLoadingSupplierProfile}
+          supplierProfileError={supplierProfileError}
+          supplierDraft={supplierDraft}
+          onSupplierDraftChange={handleSupplierDraftChange}
+          onSaveSupplier={handleSaveSupplierProfile}
+          isSavingSupplier={isSavingSupplier}
+          supplierSaveError={supplierSaveError}
+          supplierSaveMessage={supplierSaveMessage}
+          canEditSupplier={canEditSupplier}
+        />
       );
     }
 
@@ -888,7 +2216,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
     activeOverviewTab === 'RELATORIOS'
   );
 
-  const hasApiData = apiOrders.length > 0 || apiInventory.length > 0 || Boolean(dashboardReport) || todayRoute.length > 0;
+
 
   return (
     <div className="flex w-full min-h-screen bg-[#050505] dark:bg-[#050505] light:bg-gray-50 transition-colors duration-300">
@@ -909,8 +2237,19 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
         {!isLoadingDashboard && dashboardError && (
           <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 light:bg-amber-100 light:text-amber-700">
-            Nao foi possivel carregar todos os dados da API. Alguns dados demonstrativos estao sendo exibidos.
-            {hasApiData ? ' Dados da API foram carregados parcialmente.' : ''}
+            {dashboardError}
+          </div>
+        )}
+
+        {!isLoadingDashboard && !dashboardError && apiWarning && (
+          <div className="mb-6 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-300 light:bg-amber-100 light:text-amber-700">
+            {apiWarning}
+          </div>
+        )}
+
+        {!isLoadingDashboard && inventoryNotInitialized && (
+          <div className="mb-4 rounded-xl border border-[#222222] light:border-gray-200 bg-[#0d0d0d] dark:bg-[#0d0d0d] light:bg-white px-4 py-3 text-xs text-gray-400 light:text-gray-600">
+            Estoque ainda não inicializado.
           </div>
         )}
 
@@ -954,13 +2293,17 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
         {!isOverviewWorkspace && <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
           <h1 className="text-2xl font-bold !text-white dark:!text-white light:!text-gray-900">{headerTitle}</h1>
-          <div className="flex items-center gap-4 text-gray-400">
+          <button
+            type="button"
+            onClick={() => setActiveSection('CONFIGURACOES')}
+            className="flex items-center gap-4 text-left text-gray-400 transition-colors hover:text-gray-200 light:hover:text-gray-800"
+          >
             <div className="text-right">
               <p className="text-xs text-gray-500 light:text-gray-600">Perfil</p>
-              <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{companyName}</p>
+              <p className="text-sm font-medium text-white dark:text-white light:text-gray-900">{displayCompanyName}</p>
             </div>
             <div className="w-10 h-10 rounded-full bg-[#141414] border border-[#222222] light:bg-gray-200 light:border-gray-300" />
-          </div>
+          </button>
         </header>}
 
         {renderSectionContent()}

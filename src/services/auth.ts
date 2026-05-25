@@ -1,4 +1,4 @@
-import { api, clearAccessToken, setAccessToken } from './api';
+import { api, clearAccessToken, refreshAccessTokenOnce, setAccessToken } from './api';
 
 export interface LoginPayload {
   email: string;
@@ -162,6 +162,7 @@ function resolveAuthUser(response: AuthResponse): AuthenticatedUser | null {
 }
 
 export async function loginSupplier(payload: LoginPayload): Promise<AuthResult> {
+  clearAccessToken();
   try {
     const loginResponse = await api<AuthResponse>('/auth/login', {
       method: 'POST',
@@ -194,7 +195,7 @@ export async function loginSupplier(payload: LoginPayload): Promise<AuthResult> 
       user,
     };
   } catch (error) {
-    if (import.meta.env.DEV) {
+    if (import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEMO_AUTH === 'true') {
       const devUser = normalizeUserShape({
         id: 'dev-user',
         name: 'Fornecedor Demo',
@@ -215,10 +216,11 @@ export async function loginSupplier(payload: LoginPayload): Promise<AuthResult> 
 }
 
 export async function registerSupplier(payload: SupplierRegisterPayload): Promise<AuthResult> {
+  clearAccessToken();
   const registerResponse = await api<AuthResponse>('/auth/register/supplier', {
     method: 'POST',
     body: JSON.stringify({
-      email: payload.adminEmail || payload.empresaEmail,
+      email: (payload.adminEmail || payload.empresaEmail).trim(),
       password: payload.adminSenha,
       name: payload.adminNome,
       supplierName: payload.empresaNome,
@@ -268,14 +270,7 @@ export async function registerSupplier(payload: SupplierRegisterPayload): Promis
 }
 
 export async function refreshSession() {
-  const refreshResponse = await api<AuthResponse>('/auth/refresh', {
-    method: 'POST',
-  });
-
-  const token = getAuthToken(refreshResponse);
-  if (token) {
-    setAccessToken(token);
-  }
+  await refreshAccessTokenOnce();
 }
 
 export async function forgotPassword(email: string) {

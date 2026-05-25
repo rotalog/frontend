@@ -1,9 +1,14 @@
 import type { Dispatch, SetStateAction } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError } from '../services/api';
 import type { Order, OrderStatus, OrderTimelineEvent, StockItem, StockMovement } from '../types/orders';
+import type { ApiOrder, OrderTrackingResponse } from '../types/orders';
+import type { PaymentResponse } from '../types/payments';
 import { OrderApprovalPanel } from './OrderApprovalPanel';
-import { acceptOrder, cancelOrder, dispatchOrder, getOrderTracking, prepareOrder, rejectOrder } from '../services/orders';
+import { acceptOrder, cancelOrder, dispatchOrder, getOrderById, getOrderTracking, prepareOrder, rejectOrder } from '../services/orders';
+import { createPayment, getPaymentByOrderId } from '../services/payments';
 import { mockOrders, orderStatusOptions } from '../data/mockData';
+import { mapApiOrderToLegacyOrder } from '../utils/dashboardMappers';
 
 const statusStyle: Record<OrderStatus, string> = {
   PENDENTE: 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 light:bg-emerald-100 light:text-emerald-700 light:border-emerald-300',
@@ -21,7 +26,7 @@ const statusStyle: Record<OrderStatus, string> = {
 const statusLabel: Record<OrderStatus, string> = {
   PENDENTE: 'Pendente',
   SOLICITADO: 'Novo',
-  ACEITO: 'Reservado',
+  ACEITO: 'Aceito',
   REJEITADO: 'Rejeitado',
   CANCELADO: 'Cancelado',
   PAGAMENTO_CONFIRMADO: 'Pagamento confirmado',
@@ -76,24 +81,37 @@ const apiToLegacyStatus: Record<string, OrderStatus> = {
   PREPARING: 'EM_SEPARACAO',
   EM_SEPARACAO: 'EM_SEPARACAO',
   DISPATCHED: 'SAIU_PARA_ENTREGA',
-  SAIU_PARA_ENTREGA: 'SAIU_PARA_ENTREGA',
   DELIVERED: 'ENTREGUE',
+  SAIU_PARA_ENTREGA: 'SAIU_PARA_ENTREGA',
   ENTREGUE: 'ENTREGUE',
   PAYMENT_CONFIRMED: 'PAGAMENTO_CONFIRMADO',
   PAGAMENTO_CONFIRMADO: 'PAGAMENTO_CONFIRMADO',
 };
 
-const fallbackOrder: Order = {
-  id: '',
-  cliente: '',
-  valorTotal: 0,
-  status: 'PENDENTE',
-  dataDesejada: new Date().toISOString(),
-  itens: [],
-};
-
 function isRejectedStatus(status: OrderStatus) {
   return status === 'REJEITADO' || status === 'CANCELADO' || status === 'RECUSADO';
+}
+
+function isValidApiId(id?: string): boolean {
+  return typeof id === 'string' && id.length >= 20 && !id.startsWith('mock-');
+}
+
+function getOrderStatusLabel(order: Order): string {
+  if (typeof order.statusDisplay === 'string' && order.statusDisplay.trim()) {
+    return order.statusDisplay;
+  }
+
+  return statusLabel[order.status] ?? order.status;
+}
+
+function parseTrackingEvents(tracking: OrderTrackingResponse): Array<Record<string, unknown>> {
+  if (!Array.isArray(tracking.events)) {
+    return [];
+  }
+
+  return tracking.events
+    .filter(event => Boolean(event && typeof event === 'object'))
+    .map(event => event as Record<string, unknown>);
 }
 
 export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock, onRegisterStockMovements }: OrderTableProps) {
@@ -111,10 +129,16 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   const [actionFeedback, setActionFeedback] = useState<string>('');
   const [isSyncingOrder, setIsSyncingOrder] = useState<string>('');
   const [orderActionError, setOrderActionError] = useState('');
-  const [usingLocalOrderFallback, setUsingLocalOrderFallback] = useState(false);
-  const [apiActionUnavailable, setApiActionUnavailable] = useState(false);
-  const [selectedOrderId, setSelectedOrderId] = useState<string>((ordersProp ?? mockOrders)[0]?.id ?? '');
+  const [trackingInfoMessage, setTrackingInfoMessage] = useState('');
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>((ordersProp ?? mockOrders)[0]?.id ?? null);
+  const [paymentData, setPaymentData] = useState<PaymentResponse | null>(null);
+  const [isLoadingPayment, setIsLoadingPayment] = useState(false);
+  const [isCreatingPayment, setIsCreatingPayment] = useState(false);
+  const [paymentError, setPaymentError] = useState('');
+  const [paymentFeedback, setPaymentFeedback] = useState('');
   const hasInjectedRealtimeOrder = useRef(false);
+  void setStock;
+  void onRegisterStockMovements;
 
   const setOrders = (updater: SetStateAction<Order[]>) => {
     setOrdersState(current => {
@@ -195,20 +219,25 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
 
   useEffect(() => {
     if (filteredOrders.length === 0) {
+      setSelectedOrderId(null);
       return;
     }
 
-    const stillVisible = filteredOrders.some(order => order.id === selectedOrderId);
+    const stillVisible = selectedOrderId !== null && filteredOrders.some(order => order.id === selectedOrderId);
     if (!stillVisible) {
-      setSelectedOrderId(filteredOrders[0].id);
+      setSelectedOrderId(filteredOrders[0]?.id ?? null);
     }
   }, [filteredOrders, selectedOrderId]);
 
   const selectedOrder = useMemo(() => {
-    return orders.find(order => order.id === selectedOrderId) ?? orders[0] ?? fallbackOrder;
+    if (!selectedOrderId) {
+      return null;
+    }
+
+    return orders.find(order => order.id === selectedOrderId) ?? null;
   }, [orders, selectedOrderId]);
 
-  const selectedTimeline = timelineByOrder[selectedOrder.id] ?? [];
+  const selectedTimeline = selectedOrder ? (timelineByOrder[selectedOrder.id] ?? []) : [];
 
   const reportData = useMemo(() => {
     const todayRef = '2026-04-26';
@@ -232,25 +261,37 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   }, [orders]);
 
   useEffect(() => {
-    if (!selectedOrder.id) {
+    if (!selectedOrder?.id) {
+      setTrackingInfoMessage('');
       return;
     }
 
     let active = true;
 
     const loadTracking = async () => {
+      if (!isValidApiId(selectedOrder.id)) {
+        setTrackingInfoMessage('Pedido sem ID real: ações indisponíveis.');
+        return;
+      }
+
       try {
         const tracking = await getOrderTracking(selectedOrder.id);
-        if (!active || !Array.isArray(tracking.events) || tracking.events.length === 0) {
+        if (!active) {
           return;
         }
 
-        const mappedEvents: OrderTimelineEvent[] = tracking.events.map((event, index) => {
+        const events = parseTrackingEvents(tracking);
+        if (events.length === 0) {
+          setTrackingInfoMessage('');
+          return;
+        }
+
+        const mappedEvents: OrderTimelineEvent[] = events.map((event, index) => {
           const normalizedStatus = normalizeApiStatus(event.status, selectedOrder.status);
           return {
             status: normalizedStatus,
-            description: event.description ?? `Evento de rastreio ${index + 1}`,
-            createdAt: event.createdAt ?? new Date().toISOString(),
+            description: typeof event.description === 'string' ? event.description : `Evento de rastreio ${index + 1}`,
+            createdAt: typeof event.createdAt === 'string' ? event.createdAt : new Date().toISOString(),
           };
         });
 
@@ -258,8 +299,19 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
           ...current,
           [selectedOrder.id]: mappedEvents,
         }));
-      } catch {
-        // Keep local timeline when tracking API is unavailable.
+
+        setTrackingInfoMessage('');
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        if (error instanceof ApiError && error.status === 404) {
+          setTrackingInfoMessage('Tracking ainda não disponível para este pedido.');
+          return;
+        }
+
+        setTrackingInfoMessage('');
       }
     };
 
@@ -268,7 +320,39 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     return () => {
       active = false;
     };
-  }, [selectedOrder.id, selectedOrder.status]);
+  }, [selectedOrder?.id, selectedOrder?.status]);
+
+  useEffect(() => {
+    if (!selectedOrder?.id || !isValidApiId(selectedOrder.id)) {
+      return;
+    }
+
+    let active = true;
+
+    const loadOrderDetails = async () => {
+      try {
+        const apiOrder = await getOrderById(selectedOrder.id);
+        if (!active) {
+          return;
+        }
+
+        const mappedOrder = mapApiOrderToLegacyOrder(apiOrder);
+        setOrders(current => current.map(order => (
+          order.id === selectedOrder.id
+            ? { ...order, ...mappedOrder, id: selectedOrder.id }
+            : order
+        )));
+      } catch {
+        // Keep list data when details endpoint fails.
+      }
+    };
+
+    void loadOrderDetails();
+
+    return () => {
+      active = false;
+    };
+  }, [selectedOrder?.id]);
 
   const normalizeApiStatus = (value: unknown, fallbackStatus: OrderStatus): OrderStatus => {
     if (typeof value !== 'string') {
@@ -290,9 +374,91 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   };
 
   const updateOrderFromApiOrFallback = (orderId: string, apiResponse: ApiOrderLike | null | undefined, fallbackStatus: OrderStatus) => {
+    const hasApiPayload = Boolean(apiResponse && Object.keys(apiResponse).length > 0);
     const nextStatus = normalizeApiStatus(apiResponse?.status, fallbackStatus);
-    applyOrderStatusLocally(orderId, nextStatus);
+
+    if (hasApiPayload) {
+      const mappedOrder = mapApiOrderToLegacyOrder(apiResponse as ApiOrder);
+      setOrders(currentOrders => currentOrders.map(order => (
+        order.id === orderId
+          ? {
+            ...order,
+            ...mappedOrder,
+            id: orderId,
+            status: nextStatus,
+          }
+          : order
+      )));
+    } else {
+      applyOrderStatusLocally(orderId, nextStatus);
+    }
+
     return nextStatus;
+  };
+
+  const setActionErrorFromApi = (error: unknown) => {
+    if (error instanceof ApiError && error.status === 403) {
+      setOrderActionError('Você não tem permissão para executar esta ação.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status === 404) {
+      setOrderActionError('Pedido não encontrado no backend.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status === 409) {
+      setOrderActionError('Este pedido não pode mudar para esse status no momento.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status >= 500) {
+      setOrderActionError('Erro interno ao atualizar pedido. Tente novamente em instantes.');
+      return;
+    }
+
+    setOrderActionError('Erro ao atualizar pedido na API.');
+  };
+
+  const translatePaymentStatus = (status?: string): string => {
+    if (!status) {
+      return 'Sem status';
+    }
+
+    const normalized = status.toUpperCase();
+    const map: Record<string, string> = {
+      PENDING: 'Pendente',
+      PAID: 'Pago',
+      FAILED: 'Falhou',
+      CANCELLED: 'Cancelado',
+      EXPIRED: 'Expirado',
+    };
+
+    return map[normalized] ?? status;
+  };
+
+  const setPaymentErrorFromApi = (error: unknown) => {
+    if (error instanceof ApiError && error.status === 403) {
+      setPaymentError('Você não tem permissão para executar esta ação.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status === 404) {
+      setPaymentError('Pagamento não encontrado para este pedido.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status === 409) {
+      setPaymentError('Não foi possível criar pagamento para este pedido no status atual.');
+      return;
+    }
+
+    if (error instanceof ApiError && error.status >= 500) {
+      setPaymentError('Erro interno ao processar pagamento. Tente novamente em instantes.');
+      return;
+    }
+
+    setPaymentError('Erro ao processar pagamento.');
   };
 
   const appendTimeline = (orderId: string, event: OrderTimelineEvent) => {
@@ -314,58 +480,13 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
     });
   };
 
-  const reserveStockForOrder = (order: Order) => {
-    // fallback local para demonstracao enquanto a reserva/baixa real de estoque fica no backend
-    const movements = order.itens.map(item => ({
-      product: item.nome,
-      type: 'RESERVATION' as const,
-      quantity: item.quantidade,
-      source: `Pedido ${order.id} aceito`,
-    }));
-
-    setStock(currentStock =>
-      currentStock.map(entry => {
-        const orderItem = order.itens.find(item => item.nome === entry.produto);
-        if (!orderItem) {
-          return entry;
-        }
-
-        return { ...entry, reservado: entry.reservado + orderItem.quantidade };
-      }),
-    );
-
-    onRegisterStockMovements(movements);
-  };
-
-  const finalizeDispatchForOrder = (order: Order) => {
-    // fallback local para demonstracao enquanto a reserva/baixa real de estoque fica no backend
-    const movements = order.itens.map(item => ({
-      product: item.nome,
-      type: 'EXIT' as const,
-      quantity: item.quantidade,
-      source: `Pedido ${order.id} despachado`,
-    }));
-
-    setStock(currentStock =>
-      currentStock.map(entry => {
-        const orderItem = order.itens.find(item => item.nome === entry.produto);
-        if (!orderItem) {
-          return entry;
-        }
-
-        return {
-          ...entry,
-          total: Math.max(0, entry.total - orderItem.quantidade),
-          reservado: Math.max(0, entry.reservado - orderItem.quantidade),
-        };
-      }),
-    );
-
-    onRegisterStockMovements(movements);
-  };
-
   const handleAcceptOrder = async () => {
-    if (!selectedOrder.id || isSyncingOrder) {
+    if (!selectedOrder?.id || isSyncingOrder) {
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
       return;
     }
 
@@ -382,23 +503,20 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'ACEITO');
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, 'Pedido aceito via API.'));
       setActionFeedback('Pedido aceito com sincronizacao da API.');
-      setUsingLocalOrderFallback(false);
-      setApiActionUnavailable(false);
-    } catch {
-      applyOrderStatusLocally(selectedOrder.id, 'ACEITO');
-      reserveStockForOrder(selectedOrder);
-      appendTimeline(selectedOrder.id, createTimelineEvent('ACEITO', 'Pedido aceito e estoque reservado localmente.'));
-      setActionFeedback('API indisponivel. A acao foi simulada localmente.');
-      setOrderActionError('API indisponivel. A acao foi simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
+    } catch (error) {
+      setActionErrorFromApi(error);
     } finally {
       setIsSyncingOrder('');
     }
   };
 
   const handleRejectOrder = async (reason: string) => {
-    if (!selectedOrder.id || isSyncingOrder) {
+    if (!selectedOrder?.id || isSyncingOrder) {
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
       return;
     }
 
@@ -411,29 +529,112 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       setRejectionReasons(current => ({ ...current, [selectedOrder.id]: reason }));
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, `Pedido recusado via API. Motivo: ${reason}`));
       setActionFeedback('Pedido recusado com sincronizacao da API.');
-      setUsingLocalOrderFallback(false);
-      setApiActionUnavailable(false);
-    } catch {
-      applyOrderStatusLocally(selectedOrder.id, 'REJEITADO');
-      setRejectionReasons(current => ({ ...current, [selectedOrder.id]: reason }));
-      appendTimeline(selectedOrder.id, createTimelineEvent('REJEITADO', `Pedido recusado. Motivo: ${reason}`));
-      setActionFeedback('API indisponivel. A acao foi simulada localmente.');
-      setOrderActionError('API indisponivel. A acao foi simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
+    } catch (error) {
+      setActionErrorFromApi(error);
     } finally {
       setIsSyncingOrder('');
     }
   };
 
   const handleConfirmPayment = () => {
+    if (!selectedOrder?.id || !isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
+      return;
+    }
+
     applyOrderStatusLocally(selectedOrder.id, 'PAGAMENTO_CONFIRMADO');
     appendTimeline(selectedOrder.id, createTimelineEvent('PAGAMENTO_CONFIRMADO', 'Pagamento confirmado pelo financeiro.'));
     setActionFeedback('Pagamento confirmado localmente.');
   };
 
+  const handleCreatePayment = async () => {
+    if (!selectedOrder?.id || isCreatingPayment) {
+      return;
+    }
+
+    setIsCreatingPayment(true);
+    setPaymentError('');
+    setPaymentFeedback('');
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setPaymentError('Pedido sem ID real: ações indisponíveis.');
+      setIsCreatingPayment(false);
+      return;
+    }
+
+    const source = selectedOrder as unknown as Record<string, unknown>;
+    const amountCandidate = source.valorTotal ?? source.totalAmount ?? source.amount ?? source.value;
+    const parsedAmount = Number(amountCandidate);
+
+    const payload = Number.isFinite(parsedAmount)
+      ? { orderId: selectedOrder.id, amount: parsedAmount }
+      : { orderId: selectedOrder.id };
+
+    try {
+      const payment = await createPayment(payload);
+      setPaymentData(payment);
+      setPaymentFeedback('Pagamento criado com sucesso.');
+    } catch (error) {
+      setPaymentErrorFromApi(error);
+    } finally {
+      setIsCreatingPayment(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedOrder?.id) {
+      setPaymentData(null);
+      setPaymentError('');
+      setPaymentFeedback('');
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setPaymentData(null);
+      setPaymentError('Pedido sem ID real: ações indisponíveis.');
+      return;
+    }
+
+    let active = true;
+
+    const loadPayment = async () => {
+      setIsLoadingPayment(true);
+      setPaymentError('');
+
+      try {
+        const payment = await getPaymentByOrderId(selectedOrder.id);
+        if (!active) {
+          return;
+        }
+
+        setPaymentData(payment);
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+
+        setPaymentErrorFromApi(error);
+      } finally {
+        if (active) {
+          setIsLoadingPayment(false);
+        }
+      }
+    };
+
+    void loadPayment();
+
+    return () => {
+      active = false;
+    };
+  }, [selectedOrder?.id]);
+
   const handleStartPreparation = async () => {
-    if (!selectedOrder.id || isSyncingOrder) {
+    if (!selectedOrder?.id || isSyncingOrder) {
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
       return;
     }
 
@@ -445,22 +646,20 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'EM_SEPARACAO');
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, 'Separacao iniciada com sincronizacao da API.'));
       setActionFeedback('Pedido atualizado pela API para Em Separacao.');
-      setUsingLocalOrderFallback(false);
-      setApiActionUnavailable(false);
-    } catch {
-      applyOrderStatusLocally(selectedOrder.id, 'EM_SEPARACAO');
-      appendTimeline(selectedOrder.id, createTimelineEvent('EM_SEPARACAO', 'Separacao iniciada no modo local.'));
-      setActionFeedback('API indisponivel. A acao foi simulada localmente.');
-      setOrderActionError('API indisponivel. A acao foi simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
+    } catch (error) {
+      setActionErrorFromApi(error);
     } finally {
       setIsSyncingOrder('');
     }
   };
 
   const handleDispatch = async () => {
-    if (!selectedOrder.id || isSyncingOrder) {
+    if (!selectedOrder?.id || isSyncingOrder) {
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
       return;
     }
 
@@ -472,23 +671,20 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'SAIU_PARA_ENTREGA');
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, 'Pedido despachado com sincronizacao da API.'));
       setActionFeedback('Pedido despachado com sincronizacao da API.');
-      setUsingLocalOrderFallback(false);
-      setApiActionUnavailable(false);
-    } catch {
-      finalizeDispatchForOrder(selectedOrder);
-      applyOrderStatusLocally(selectedOrder.id, 'SAIU_PARA_ENTREGA');
-      appendTimeline(selectedOrder.id, createTimelineEvent('SAIU_PARA_ENTREGA', 'Pedido despachado e estoque baixado definitivamente.'));
-      setActionFeedback('API indisponivel. A acao foi simulada localmente.');
-      setOrderActionError('API indisponivel. A acao foi simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
+    } catch (error) {
+      setActionErrorFromApi(error);
     } finally {
       setIsSyncingOrder('');
     }
   };
 
   const handleCancelOrder = async () => {
-    if (!selectedOrder.id || isSyncingOrder) {
+    if (!selectedOrder?.id || isSyncingOrder) {
+      return;
+    }
+
+    if (!isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
       return;
     }
 
@@ -500,21 +696,19 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       const nextStatus = updateOrderFromApiOrFallback(selectedOrder.id, response as ApiOrderLike, 'CANCELADO');
       appendTimeline(selectedOrder.id, createTimelineEvent(nextStatus, 'Pedido cancelado via API.'));
       setActionFeedback('Pedido cancelado com sincronizacao da API.');
-      setUsingLocalOrderFallback(false);
-      setApiActionUnavailable(false);
-    } catch {
-      applyOrderStatusLocally(selectedOrder.id, 'CANCELADO');
-      appendTimeline(selectedOrder.id, createTimelineEvent('CANCELADO', 'Pedido cancelado no modo local.'));
-      setActionFeedback('API indisponivel. A acao foi simulada localmente.');
-      setOrderActionError('API indisponivel. A acao foi simulada localmente.');
-      setUsingLocalOrderFallback(true);
-      setApiActionUnavailable(true);
+    } catch (error) {
+      setActionErrorFromApi(error);
     } finally {
       setIsSyncingOrder('');
     }
   };
 
   const handleMarkDelivered = () => {
+    if (!selectedOrder?.id || !isValidApiId(selectedOrder.id)) {
+      setOrderActionError('Pedido sem ID real: ações indisponíveis.');
+      return;
+    }
+
     applyOrderStatusLocally(selectedOrder.id, 'ENTREGUE');
     appendTimeline(selectedOrder.id, createTimelineEvent('ENTREGUE', 'Entrega confirmada pelo fornecedor.'));
     setActionFeedback('Entrega concluida com sucesso.');
@@ -556,9 +750,10 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
             <p className="text-xs text-amber-300 light:text-amber-700">{orderActionError}</p>
           )}
 
-          {usingLocalOrderFallback && apiActionUnavailable && (
-            <p className="text-xs text-amber-300 light:text-amber-700">API indisponivel. A acao foi simulada localmente.</p>
+          {trackingInfoMessage && (
+            <p className="text-xs text-gray-400 light:text-gray-600">{trackingInfoMessage}</p>
           )}
+
         </div>
 
         {notification && (
@@ -590,7 +785,7 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
             </thead>
             <tbody>
               {filteredOrders.map(order => {
-                const isSelected = selectedOrder.id === order.id;
+                const isSelected = selectedOrder?.id === order.id;
 
                 return (
                   <tr
@@ -607,7 +802,7 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
                     <td className="px-5 py-4 text-sm text-gray-300 light:text-gray-700">{formatCurrency(order.valorTotal)}</td>
                     <td className="px-5 py-4 text-sm">
                       <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${statusStyle[order.status]}`}>
-                        {statusLabel[order.status]}
+                        {getOrderStatusLabel(order)}
                       </span>
                     </td>
                     <td className="px-5 py-4 text-sm">
@@ -641,6 +836,7 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
         order={selectedOrder}
         statusLabel={statusLabel}
         statusStyle={statusStyle}
+        statusLabelOverride={selectedOrder ? getOrderStatusLabel(selectedOrder) : undefined}
         onAccept={handleAcceptOrder}
         onReject={handleRejectOrder}
         onConfirmPayment={handleConfirmPayment}
@@ -648,11 +844,20 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
         onDispatch={handleDispatch}
         onCancel={handleCancelOrder}
         onMarkDelivered={handleMarkDelivered}
-        rejectionReason={rejectionReasons[selectedOrder.id]}
+        rejectionReason={selectedOrder ? rejectionReasons[selectedOrder.id] : undefined}
         timeline={selectedTimeline}
         stock={stock}
         actionFeedback={actionFeedback}
-        isSyncing={Boolean(isSyncingOrder) && isSyncingOrder === selectedOrder.id}
+        isSyncing={Boolean(isSyncingOrder) && isSyncingOrder === (selectedOrder?.id ?? '')}
+        payment={paymentData}
+        paymentStatusLabel={translatePaymentStatus(paymentData?.status)}
+        paymentError={paymentError}
+        paymentFeedback={paymentFeedback}
+        isLoadingPayment={isLoadingPayment}
+        isCreatingPayment={isCreatingPayment}
+        onCreatePayment={handleCreatePayment}
+        isActionDisabled={selectedOrder ? !isValidApiId(selectedOrder.id) : false}
+        actionDisabledMessage={selectedOrder && !isValidApiId(selectedOrder.id) ? 'Pedido sem ID real: ações indisponíveis.' : undefined}
       />
 
       <div className="xl:col-span-2 grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -666,7 +871,7 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
               <li key={order.id} className="flex items-center justify-between rounded-lg border border-[#2a2a2a] light:border-gray-200 p-2.5">
                 <span className="text-sm text-gray-300 light:text-gray-700">{order.id} - {order.cliente}</span>
                 <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${statusStyle[order.status]}`}>
-                  {statusLabel[order.status]}
+                  {getOrderStatusLabel(order)}
                 </span>
               </li>
             ))}

@@ -6,11 +6,16 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    // ALTERACAO: proxy para desenvolvimento local com backend em /api/v1.
     proxy: {
       '/api': {
         target: 'https://api.rotalog.madebyhermes.com',
         changeOrigin: true,
+        secure: true,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.removeHeader('origin');
+          });
+        },
       },
     },
   },

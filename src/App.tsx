@@ -5,7 +5,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
 import type { AuthResult, AuthenticatedUser } from './services/auth';
-import { getCompanyNameFromUser, getCurrentUser, logoutSupplier } from './services/auth';
+import { getCompanyNameFromUser, getCurrentUser, logoutSupplier, refreshSession } from './services/auth';
 
 function App() {
   const { theme, toggleTheme } = useTheme();
@@ -16,8 +16,23 @@ function App() {
   useEffect(() => {
     let active = true;
 
+    const PUBLIC_PATHS = ['/login', '/cadastro', '/register', '/forgot-password', '/reset-password'];
+    const isPublicRoute = PUBLIC_PATHS.some(
+      p => window.location.pathname === p || window.location.pathname.startsWith(p + '/'),
+    );
+
     const bootstrapSession = async () => {
+      if (isPublicRoute) {
+        if (active) {
+          setCurrentUser(null);
+          setCompanyName('');
+          setIsLoadingAuth(false);
+        }
+        return;
+      }
+
       try {
+        await refreshSession().catch(() => undefined);
         const user = await getCurrentUser();
         if (!active) {
           return;

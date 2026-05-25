@@ -1,6 +1,6 @@
-const DEFAULT_API_URL = 'https://api.rotalog.madebyhermes.com/api/v1';
-
+const DEFAULT_API_URL = '/api/v1';
 export const API_URL = (import.meta.env.VITE_API_URL ?? DEFAULT_API_URL).replace(/\/$/, '');
+const USE_API = String(import.meta.env.VITE_USE_API ?? 'true').toLowerCase() !== 'false';
 
 let accessToken: string | null = null;
 
@@ -79,15 +79,74 @@ async function safeReadJson(response: Response): Promise<unknown> {
   }
 }
 
+function isPublicAuthPath(path: string): boolean {
+  return [
+    '/auth/login',
+    '/auth/register',
+    '/auth/register/supplier',
+    '/auth/refresh',
+    '/auth/logout',
+    '/auth/forgot-password',
+    '/auth/reset-password',
+  ].some(publicPath => path.startsWith(publicPath));
+}
+
+let refreshPromise: Promise<string | null> | null = null;
+
+export async function refreshAccessTokenOnce(): Promise<string | null> {
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  refreshPromise = (async () => {
+    try {
+      const refreshResponse = await fetch(`${API_URL}/auth/refresh`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+
+      const refreshData = await safeReadJson(refreshResponse);
+      if (refreshResponse.ok && refreshData && typeof refreshData === 'object') {
+        const payload = refreshData as { accessToken?: unknown; token?: unknown };
+        const nextToken =
+          typeof payload.accessToken === 'string'
+            ? payload.accessToken
+            : typeof payload.token === 'string'
+              ? payload.token
+              : null;
+
+        if (nextToken) {
+          setAccessToken(nextToken);
+          return nextToken;
+        }
+      }
+
+      clearAccessToken();
+      return null;
+    } catch {
+      clearAccessToken();
+      return null;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
+}
+
 export async function api<T>(
   path: string,
   options: RequestInit = {},
   retry = true,
 ): Promise<T> {
+  if (!USE_API) {
+    throw new ApiError('Uso da API desabilitado em VITE_USE_API.', 503, { path });
+  }
+
   const headers = new Headers(options.headers ?? undefined);
   const body = options.body;
 
-  if (accessToken && !headers.has('Authorization')) {
+  if (accessToken && !isPublicAuthPath(path) && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${accessToken}`);
   }
 
@@ -103,35 +162,16 @@ export async function api<T>(
 
   const response = await fetch(`${API_URL}${path}`, requestOptions);
 
-  if (response.status === 401 && retry) {
-    try {
-      const refreshResponse = await fetch(`${API_URL}/auth/refresh`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-
-      const refreshData = await safeReadJson(refreshResponse);
-      if (refreshResponse.ok) {
-        if (refreshData && typeof refreshData === 'object') {
-          const payload = refreshData as { accessToken?: unknown; token?: unknown };
-          const nextToken = typeof payload.accessToken === 'string'
-            ? payload.accessToken
-            : typeof payload.token === 'string'
-              ? payload.token
-              : null;
-
-          if (nextToken) {
-            setAccessToken(nextToken);
-          }
-        }
-
-        return api<T>(path, options, false);
-      }
-    } catch {
-      clearAccessToken();
+  if (
+    (response.status === 401 || response.status === 403) &&
+    retry &&
+    !isPublicAuthPath(path) &&
+    !path.startsWith('/auth/refresh')
+  ) {
+    const newToken = await refreshAccessTokenOnce();
+    if (newToken) {
+      return api<T>(path, options, false);
     }
-
-    clearAccessToken();
   }
 
   if (response.status === 204) {

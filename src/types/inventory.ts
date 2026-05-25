@@ -1,27 +1,31 @@
-export interface ApiInventoryItem {
+export interface InventoryResponse {
+  inventoryId: string;
   productId: string;
-  productName?: string;
-  sku?: string;
-  quantity: number;
-  reservedQuantity?: number;
-  availableQuantity?: number;
-  updatedAt?: string;
-  [key: string]: unknown;
+  supplierId: string;
+  totalQuantity: number;
+  reservedQuantity: number;
+  availableQuantity: number;
+  badges: string[];
 }
 
-export interface UpdateInventoryPayload {
+export interface InventoryAdjustmentPayload {
   quantity: number;
   reason: string;
-  [key: string]: unknown;
 }
 
-export interface InventoryMovement {
+export interface StockMovementResponse {
   id: string;
-  productId?: string;
-  productName?: string;
-  type: string;
+  inventoryId: string;
+  productId: string;
+  supplierId: string;
+  movementType: string;
   quantity: number;
-  createdAt?: string;
-  source?: string;
-  [key: string]: unknown;
+  referenceId?: string;
+  reason?: string;
+  createdAt: string;
 }
+
+// Backward-compatible aliases used by existing dashboard and mappers.
+export type ApiInventoryItem = InventoryResponse;
+export type UpdateInventoryPayload = InventoryAdjustmentPayload;
+export type InventoryMovement = StockMovementResponse;

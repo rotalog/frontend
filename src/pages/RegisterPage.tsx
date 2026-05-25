@@ -1,9 +1,10 @@
-import { Moon, Sun } from 'lucide-react';
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { AuthResult } from '../services/auth';
 import { registerSupplier } from '../services/auth';
+import { ApiError } from '../services/api';
+import { ThemeToggleButton } from '../Components/ThemeToggleButton';
 
 interface RegisterPageProps {
   theme: 'dark' | 'light';
@@ -139,7 +140,23 @@ export function RegisterPage({ theme, toggleTheme, onRegister }: RegisterPagePro
         },
       });
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : 'Nao foi possivel concluir cadastro.');
+      if (error instanceof ApiError) {
+        if (error.status === 400) {
+          setSubmitError('Verifique os dados informados.');
+        } else if (error.status === 403) {
+          setSubmitError('Você não tem permissão para realizar este cadastro.');
+        } else if (error.status === 409) {
+          setSubmitError('Este e-mail já está cadastrado.');
+        } else if (error.status >= 500) {
+          setSubmitError('Erro interno no servidor. Tente novamente em instantes.');
+        } else {
+          setSubmitError(error.message || 'Não foi possível concluir cadastro.');
+        }
+      } else if (error instanceof TypeError) {
+        setSubmitError('Não foi possível conectar à API.');
+      } else {
+        setSubmitError(error instanceof Error ? error.message : 'Não foi possível concluir cadastro.');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -147,14 +164,7 @@ export function RegisterPage({ theme, toggleTheme, onRegister }: RegisterPagePro
 
   return (
     <div className="min-h-screen w-full bg-[#050505] dark:bg-[#050505] light:bg-gray-50 transition-colors duration-300 flex flex-col items-center justify-start md:justify-center px-4 py-8 md:py-12">
-      <button
-        type="button"
-        onClick={toggleTheme}
-        className="fixed top-4 right-4 sm:top-5 sm:right-5 inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-[#2a2a2a] light:border-gray-300 bg-[#141414] dark:bg-[#141414] light:bg-white text-gray-300 light:text-gray-700 hover:text-[#00ff66] transition-colors z-10"
-      >
-        {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-        <span className="text-xs sm:text-sm font-medium">{theme === 'dark' ? 'Modo Claro' : 'Modo Escuro'}</span>
-      </button>
+      <ThemeToggleButton theme={theme} onClick={toggleTheme} className="fixed top-4 right-4 sm:top-5 sm:right-5 z-10" />
 
       <div className="w-full max-w-2xl bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-2xl p-6 shadow-card">
         <div className="mb-6">
