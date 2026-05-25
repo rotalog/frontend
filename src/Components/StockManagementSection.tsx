@@ -75,7 +75,7 @@ function toInputDate(isoDate: string) {
   return `${year}-${month}-${day}`;
 }
 
-export function StockManagementSection({ stock, setStock, movements, onRegisterMovements: _onRegisterMovements }: StockManagementSectionProps) {
+export function StockManagementSection({ stock, setStock, movements }: StockManagementSectionProps) {
   const [editableRows, setEditableRows] = useState<EditableRowState>({});
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [importFeedback, setImportFeedback] = useState('');

@@ -239,6 +239,15 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
 
   const selectedTimeline = selectedOrder ? (timelineByOrder[selectedOrder.id] ?? []) : [];
 
+  const normalizeApiStatus = (value: unknown, fallbackStatus: OrderStatus): OrderStatus => {
+    if (typeof value !== 'string') {
+      return fallbackStatus;
+    }
+
+    const normalized = value.toUpperCase();
+    return apiToLegacyStatus[normalized] ?? fallbackStatus;
+  };
+
   const reportData = useMemo(() => {
     const todayRef = '2026-04-26';
     const deliveriesToday = orders.filter(order =>
@@ -353,15 +362,6 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       active = false;
     };
   }, [selectedOrder?.id]);
-
-  const normalizeApiStatus = (value: unknown, fallbackStatus: OrderStatus): OrderStatus => {
-    if (typeof value !== 'string') {
-      return fallbackStatus;
-    }
-
-    const normalized = value.toUpperCase();
-    return apiToLegacyStatus[normalized] ?? fallbackStatus;
-  };
 
   const applyOrderStatusLocally = (orderId: string, nextStatus: OrderStatus) => {
     setOrders(currentOrders =>
