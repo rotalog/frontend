@@ -29,6 +29,10 @@ export class ApiError extends Error {
 }
 
 function getFriendlyErrorMessage(status: number, data: unknown): string {
+  if (status === 404 && isProductNotFound(data)) {
+    return 'Produto nao encontrado. Atualize a lista de produtos e tente novamente com um produto ativo deste fornecedor.';
+  }
+
   if (data && typeof data === 'object') {
     const payload = data as { message?: unknown; error?: unknown };
 
@@ -54,6 +58,15 @@ function getFriendlyErrorMessage(status: number, data: unknown): string {
   }
 
   return `Falha na comunicacao com o servidor (HTTP ${status}).`;
+}
+
+function isProductNotFound(data: unknown) {
+  if (!data || typeof data !== 'object') {
+    return false;
+  }
+
+  const payload = data as { message?: unknown };
+  return payload.message === 'Product not found';
 }
 
 async function safeReadJson(response: Response): Promise<unknown> {

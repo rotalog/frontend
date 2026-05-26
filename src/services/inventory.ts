@@ -21,6 +21,10 @@ export async function updateInventory(
   productId: string,
   payload: InventoryAdjustmentPayload,
 ): Promise<InventoryResponse> {
+  if (!isInventoryProductId(productId)) {
+    throw new Error('ID de produto invalido para sincronizar estoque.');
+  }
+
   if (!Number.isFinite(payload.quantity) || payload.quantity <= 0) {
     throw new Error('A quantidade de entrada deve ser maior que zero.');
   }
@@ -56,4 +60,9 @@ export async function importInventoryCsv(csvContent: string): Promise<void> {
     },
     body: csvContent,
   });
+}
+
+export function isInventoryProductId(value?: string): value is string {
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
