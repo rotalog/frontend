@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { ApiError } from '../services/api';
-import { getInventoryMovements, updateInventory } from '../services/inventory';
+import { getInventoryMovements, isInventoryProductId, updateInventory } from '../services/inventory';
 import { createProduct, deleteProduct, updateProduct } from '../services/products';
 import type { StockItem, StockMovement, StockMovementType } from '../types/orders';
 import type { StockMovementResponse } from '../types/inventory';
@@ -40,7 +40,7 @@ function getRealProductId(item: StockItem): string | undefined {
 }
 
 function isValidApiId(id?: string): id is string {
-  return typeof id === 'string' && !id.startsWith('mock-') && id.length >= 20;
+  return isInventoryProductId(id);
 }
 
 const movementTypeLabels: Record<StockMovementType, string> = {
