@@ -1,5 +1,6 @@
 import type { ComponentType } from 'react';
 import { LayoutDashboard, Package, ShoppingCart, Truck, BarChart3, Settings, LogOut, Sun, Moon } from 'lucide-react';
+import { RotalogBrand } from './RotalogBrand';
 
 export type DashboardSection = 'VISAO_GERAL' | 'PEDIDOS' | 'ESTOQUE' | 'ENTREGAS' | 'RELATORIOS' | 'CONFIGURACOES';
 
@@ -22,15 +23,8 @@ interface SidebarProps {
 export function Sidebar({ theme, toggleTheme, onLogout, activeSection, onSectionChange }: SidebarProps) {
   return (
     <aside className="w-64 h-screen bg-[#0a0a0a] dark:bg-[#0a0a0a] light:bg-white border-r border-[#222222] dark:border-[#222222] light:border-gray-200 flex flex-col p-4 transition-colors duration-300">
-      {/* Logo */}
-      <div className="flex items-center gap-2 px-2 mb-10">
-        <div className="w-8 h-8 bg-[#00ff66] rounded-lg flex items-center justify-center">
-          <span className="text-black font-bold">R</span>
-        </div>
-        <span className="text-white dark:text-white light:text-black font-bold text-xl tracking-tight">ROTALOG</span>
-      </div>
+      <RotalogBrand className="px-2 mb-10" iconClassName="h-11 w-11" textClassName="text-[2rem]" />
 
-      {/* Menu de Navegação */}
       <nav className="flex-1 space-y-2">
         {menuItems.map((item) => (
           <button
@@ -49,9 +43,7 @@ export function Sidebar({ theme, toggleTheme, onLogout, activeSection, onSection
         ))}
       </nav>
 
-      {/* Rodapé da Sidebar */}
       <div className="border-t border-[#222222] light:border-gray-200 pt-4 space-y-2">
-        {/* Botão de Alternar Tema */}
         <button 
           onClick={toggleTheme}
           className="w-full flex items-center gap-3 px-3 py-3 text-gray-500 hover:text-[#00ff66] light:text-gray-600 light:hover:text-gray-900 transition-colors"

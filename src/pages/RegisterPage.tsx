@@ -4,6 +4,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import type { AuthResult } from '../services/auth';
 import { registerSupplier } from '../services/auth';
 import { ApiError } from '../services/api';
+import { RotalogBrand } from '../Components/RotalogBrand';
 import { ThemeToggleButton } from '../Components/ThemeToggleButton';
 
 interface RegisterPageProps {
@@ -168,6 +169,7 @@ export function RegisterPage({ theme, toggleTheme, onRegister }: RegisterPagePro
 
       <div className="w-full max-w-2xl bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-2xl p-6 shadow-card">
         <div className="mb-6">
+          <RotalogBrand className="mb-4" iconClassName="h-16 w-16" textClassName="text-[2.6rem]" />
           <h1 className="text-2xl font-bold !text-white dark:!text-white light:!text-gray-900">Criar conta</h1>
           <p className="text-sm text-gray-400 light:text-gray-500 mt-1">Cadastre sua empresa e administrador.</p>
         </div>

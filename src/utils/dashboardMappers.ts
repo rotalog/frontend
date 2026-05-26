@@ -156,14 +156,27 @@ export function mapApiInventoryToLegacyStock(apiInventory: ApiInventoryItem): St
   const source = apiInventory as unknown as Record<string, unknown>;
   const productName = toString(source.productName ?? source.name ?? source.produto, 'Produto');
   const photoUrl = toString(source.photoUrl ?? source.fotoUrl);
+  const totalQuantity = getNumberValue(source, ['totalQuantity', 'quantity', 'total'], 0);
+  const reservedQuantity = getNumberValue(source, ['reservedQuantity', 'reserved', 'reservado'], 0);
+  const availableQuantity = getNumberValue(source, ['availableQuantity', 'available', 'disponivel'], Math.max(0, totalQuantity - reservedQuantity));
 
   return {
     codigo: toString(source.sku ?? source.codigo ?? source.productId, productName.toUpperCase().replace(/\s+/g, '-')),
     produto: productName,
-    total: getNumberValue(source, ['quantity', 'totalQuantity', 'total'], 0),
-    reservado: getNumberValue(source, ['reservedQuantity', 'reserved', 'reservado'], 0),
+    total: totalQuantity,
+    reservado: reservedQuantity,
     fotoUrl: photoUrl || undefined,
-  };
+    id: toString(source.productId ?? source.id),
+    productId: toString(source.productId ?? source.id),
+    inventoryId: toString(source.inventoryId),
+    supplierId: toString(source.supplierId),
+    totalQuantity,
+    reservedQuantity,
+    availableQuantity,
+    badges: Array.isArray(source.badges)
+      ? source.badges.filter((badge): badge is string => typeof badge === 'string')
+      : [],
+  } as StockItem;
 }
 
 export function calculateFallbackKpis(orders: Order[], inventory: StockItem[]) {
@@ -180,7 +193,17 @@ export function calculateFallbackKpis(orders: Order[], inventory: StockItem[]) {
     ? Math.round((acceptedOrders.length / orders.length) * 100)
     : 0;
 
-  const lowStockCount = inventory.filter(item => (item.total - item.reservado) <= 20).length;
+  const lowStockCount = inventory.filter(item => {
+    const stockItem = item as StockItem & { minStockLevel?: number; availableQuantity?: number };
+    const minStockLevel = typeof stockItem.minStockLevel === 'number' && Number.isFinite(stockItem.minStockLevel)
+      ? stockItem.minStockLevel
+      : 0;
+    const available = typeof stockItem.availableQuantity === 'number' && Number.isFinite(stockItem.availableQuantity)
+      ? stockItem.availableQuantity
+      : item.total - item.reservado;
+
+    return minStockLevel > 0 && available <= minStockLevel;
+  }).length;
 
   const productTotals = validOrders.reduce<Record<string, number>>((acc, order) => {
     order.itens.forEach(item => {

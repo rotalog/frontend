@@ -82,6 +82,7 @@ type DashboardStockRow = {
   product: string;
   available: number;
   reserved: number;
+  minStockLevel: number;
 };
 
 type SupplierDraft = {
@@ -125,6 +126,7 @@ function mapProductAndInventoryToStock(products: ApiProduct[], inventory: ApiInv
     return {
       id: product.id,
       productId: product.id,
+      inventoryId: inventoryItem?.inventoryId,
       supplierId: product.supplierId,
       codigo: product.id,
       name: product.name,
@@ -137,7 +139,7 @@ function mapProductAndInventoryToStock(products: ApiProduct[], inventory: ApiInv
       totalQuantity,
       reservedQuantity,
       availableQuantity,
-      badges: [],
+      badges: inventoryItem?.badges ?? [],
     };
   });
 
@@ -602,33 +604,6 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       active = false;
     };
   }, [companyName, currentUserProfile?.email, supplierId]);
-
-  useEffect(() => {
-    if (!usingMockFallback) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      const realtimeOrder: Order = {
-        id: 'PED-1130',
-        cliente: 'Mercado Central',
-        valorTotal: 735.5,
-        status: 'PAGAMENTO_CONFIRMADO',
-        dataDesejada: '2026-05-15',
-        itens: [
-          { nome: 'Arroz 5kg', quantidade: 10, preco: 26.9 },
-          { nome: 'Feijao 1kg', quantidade: 25, preco: 8.5 },
-        ],
-      };
-
-      setOverviewOrders(current => (
-        current.some(order => order.id === realtimeOrder.id) ? current : [realtimeOrder, ...current]
-      ));
-      setStockNotice(`Novo pedido recebido - ${realtimeOrder.cliente}`);
-    }, 8000);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [usingMockFallback]);
 
   const headerTitle = useMemo(() => {
     switch (activeSection) {
@@ -1230,8 +1205,9 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
 
     return stock.slice(0, 6).map(item => ({
       product: item.produto,
-      available: item.total,
+      available: (item as typeof item & { availableQuantity?: number }).availableQuantity ?? Math.max(0, item.total - item.reservado),
       reserved: reservedByProduct[item.produto] ?? item.reservado,
+      minStockLevel: (item as typeof item & { minStockLevel?: number }).minStockLevel ?? 0,
     }));
   }, [preparingOrders, stock]);
 
@@ -1647,7 +1623,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
                   <tbody>
                     {dashboardStockRows.map(row => {
                       const reservedRatio = row.available > 0 ? Math.min(100, (row.reserved / row.available) * 100) : 100;
-                      const isLow = row.available <= 20;
+                      const isLow = row.minStockLevel > 0 && row.available <= row.minStockLevel;
                       const hasReservation = row.reserved > 0;
 
                       return (

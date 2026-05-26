@@ -1,5 +1,5 @@
 import type { Dispatch, SetStateAction } from 'react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ApiError } from '../services/api';
 import type { Order, OrderStatus, OrderTimelineEvent, StockItem, StockMovement } from '../types/orders';
 import type { ApiOrder, OrderTrackingResponse } from '../types/orders';
@@ -136,7 +136,6 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
   const [isCreatingPayment, setIsCreatingPayment] = useState(false);
   const [paymentError, setPaymentError] = useState('');
   const [paymentFeedback, setPaymentFeedback] = useState('');
-  const hasInjectedRealtimeOrder = useRef(false);
   void setStock;
   void onRegisterStockMovements;
 
@@ -170,44 +169,6 @@ export function OrderTable({ orders: ordersProp, onOrdersChange, stock, setStock
       return next;
     });
   }, [orders, timelineByOrder]);
-
-  useEffect(() => {
-    if (ordersProp !== undefined) {
-      return;
-    }
-
-    if (hasInjectedRealtimeOrder.current) {
-      return;
-    }
-
-    hasInjectedRealtimeOrder.current = true;
-    // simulacao temporaria de novo pedido enquanto WebSocket nao esta integrado.
-    const timeoutId = window.setTimeout(() => {
-      const realtimeOrder: Order = {
-        id: 'PED-1050',
-        cliente: 'Restaurante Nova Mesa',
-        valorTotal: 640.7,
-        status: 'SOLICITADO',
-        dataDesejada: '2026-04-26',
-        itens: [
-          { nome: 'Molho de Tomate 340g', quantidade: 20, preco: 3.9 },
-          { nome: 'Macarrao 500g', quantidade: 40, preco: 4.1 },
-        ],
-      };
-
-      setOrders(current => [realtimeOrder, ...current]);
-      setTimelineByOrder(current => ({
-        ...current,
-        [realtimeOrder.id]: [createTimelineEvent('PENDENTE', 'Pedido recebido em tempo real.')],
-      }));
-      setNotification({
-        id: realtimeOrder.id,
-        message: `Novo pedido em tempo real: ${realtimeOrder.id} (${realtimeOrder.cliente})`,
-      });
-    }, 8000);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [ordersProp]);
 
   const filteredOrders = useMemo(() => {
     if (statusFilter === 'ALL') {

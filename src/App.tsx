@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { RotalogBrand } from './Components/RotalogBrand';
 import { useTheme } from './hooks/useTheme';
 import { DashboardPage } from './pages/DashboardPage';
+import { ForgotPasswordPage } from './pages/ForgotPasswordPage.tsx';
 import { LoginPage } from './pages/LoginPage';
 import { RegisterPage } from './pages/RegisterPage';
+import { ResetPasswordPage } from './pages/ResetPasswordPage.tsx';
 import type { AuthResult, AuthenticatedUser } from './services/auth';
 import { getCompanyNameFromUser, getCurrentUser, logoutSupplier, refreshSession } from './services/auth';
 
@@ -91,8 +94,9 @@ function App() {
 
   if (isLoadingAuth) {
     return (
-      <div className="min-h-screen w-full bg-[#050505] dark:bg-[#050505] light:bg-gray-50 flex items-center justify-center text-sm text-gray-300 light:text-gray-700">
-        Carregando sessao...
+      <div className="min-h-screen w-full bg-[#050505] dark:bg-[#050505] light:bg-gray-50 flex flex-col items-center justify-center gap-4 text-sm text-gray-300 light:text-gray-700">
+        <RotalogBrand iconClassName="h-20 w-20" textClassName="text-5xl" />
+        <span>Carregando sessao...</span>
       </div>
     );
   }
@@ -103,19 +107,27 @@ function App() {
         <Route path="/" element={<Navigate to="/login" replace />} />
         <Route
           path="/login"
-          element={
-            isAuthenticated
-              ? <Navigate to="/dashboard" replace />
-              : <LoginPage theme={theme} toggleTheme={toggleTheme} onLogin={handleLogin} />
-          }
+          element={<LoginPage theme={theme} toggleTheme={toggleTheme} onLogin={handleLogin} />}
         />
         <Route
           path="/cadastro"
-          element={
-            isAuthenticated
-              ? <Navigate to="/dashboard" replace />
-              : <RegisterPage theme={theme} toggleTheme={toggleTheme} onRegister={handleRegister} />
-          }
+          element={<RegisterPage theme={theme} toggleTheme={toggleTheme} onRegister={handleRegister} />}
+        />
+        <Route
+          path="/register"
+          element={<RegisterPage theme={theme} toggleTheme={toggleTheme} onRegister={handleRegister} />}
+        />
+        <Route
+          path="/forgot-password"
+          element={<ForgotPasswordPage theme={theme} toggleTheme={toggleTheme} />}
+        />
+        <Route
+          path="/reset-password"
+          element={<ResetPasswordPage theme={theme} toggleTheme={toggleTheme} />}
+        />
+        <Route
+          path="/reset-password/:token"
+          element={<ResetPasswordPage theme={theme} toggleTheme={toggleTheme} />}
         />
         <Route
           path="/dashboard"

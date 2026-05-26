@@ -47,3 +47,13 @@ export async function getInventoryMovements(): Promise<StockMovementResponse[]> 
     throw error;
   }
 }
+
+export async function importInventoryCsv(csvContent: string): Promise<void> {
+  return api<void>('/inventory/import', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/csv',
+    },
+    body: csvContent,
+  });
+}

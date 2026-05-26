@@ -34,6 +34,11 @@ type StockIdentity = StockItem & {
   badges?: string[];
 };
 
+function getRealProductId(item: StockItem): string | undefined {
+  const stockIdentity = item as StockIdentity;
+  return stockIdentity.productId || stockIdentity.id;
+}
+
 function isValidApiId(id?: string): id is string {
   return typeof id === 'string' && !id.startsWith('mock-') && id.length >= 20;
 }
@@ -95,17 +100,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
   const [apiMovements, setApiMovements] = useState<StockMovement[] | null>(null);
 
   const getStockProductId = (item: StockItem) => {
-    const stockIdentity = item as StockIdentity;
-    return stockIdentity.productId ?? stockIdentity.id ?? item.codigo ?? item.produto;
-  };
-
-  const getRealStockProductId = (item: StockItem) => {
-    const stockIdentity = item as StockIdentity;
-    return typeof stockIdentity.productId === 'string'
-      ? stockIdentity.productId
-      : typeof stockIdentity.id === 'string'
-        ? stockIdentity.id
-        : undefined;
+    return getRealProductId(item) ?? item.codigo ?? item.produto;
   };
 
   const getMinStockLevel = (item: StockItem) => {
@@ -147,7 +142,9 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
   useEffect(() => {
     const nextEditableRows = stock.reduce<EditableRowState>((acc, item) => {
-      acc[item.produto] = {
+      const rowId = getStockProductId(item);
+
+      acc[rowId] = {
         total: String(item.total),
         reserved: String(item.reservado),
       };
@@ -188,39 +185,68 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     };
   }, [showMovementHistory]);
 
-  const handleSaveRow = async (productName: string) => {
-    const stockItem = stock.find(item => item.produto === productName);
-    const editable = editableRows[productName];
+  const handleSaveRow = async (rowId: string) => {
+    const stockItem = stock.find(item => getStockProductId(item) === rowId);
+    const editable = editableRows[rowId];
 
     if (!stockItem || !editable) {
       return;
     }
 
+    const stockIdentity = stockItem as StockIdentity;
+
     const nextTotal = Number(editable.total);
     if (!Number.isFinite(nextTotal) || nextTotal < 0) {
-      setRowErrors(current => ({ ...current, [productName]: 'Valores invalidos. Use numeros positivos.' }));
+      setRowErrors(current => ({ ...current, [rowId]: 'Valores invalidos. Use numeros positivos.' }));
       return;
     }
 
-    const productId = getRealStockProductId(stockItem);
+    const productId = getRealProductId(stockItem);
     if (!isValidApiId(productId)) {
-      setRowErrors(current => ({ ...current, [productName]: '' }));
+      setRowErrors(current => ({ ...current, [rowId]: '' }));
       setStockActionError('Produto sem ID real: não foi possível ajustar estoque.');
+      setEditableRows(current => ({
+        ...current,
+        [rowId]: {
+          total: String(stockIdentity.totalQuantity ?? stockItem.total),
+          reserved: String(stockIdentity.reservedQuantity ?? stockItem.reservado),
+        },
+      }));
       return;
     }
 
-    const currentTotal = stockItem.total;
+    const currentTotal = stockIdentity.totalQuantity ?? stockItem.total;
     const quantityToAdd = nextTotal - currentTotal;
 
-    if (quantityToAdd <= 0) {
-      setRowErrors(current => ({ ...current, [productName]: '' }));
-      setStockActionError('O backend atual permite apenas entrada de estoque. Para reduzir ou definir total menor, será necessário endpoint específico.');
+    if (quantityToAdd === 0) {
+      setRowErrors(current => ({ ...current, [rowId]: '' }));
+      setStockActionError('Nenhuma alteração de estoque identificada.');
+      setEditableRows(current => ({
+        ...current,
+        [rowId]: {
+          total: String(currentTotal),
+          reserved: String(stockIdentity.reservedQuantity ?? stockItem.reservado),
+        },
+      }));
+      return;
+    }
+
+    if (quantityToAdd < 0) {
+      setRowErrors(current => ({ ...current, [rowId]: '' }));
+      setStockActionError('O backend atual permite apenas entrada de estoque. Para reduzir o total, será necessário endpoint específico.');
+      setEditableRows(current => ({
+        ...current,
+        [rowId]: {
+          total: String(currentTotal),
+          reserved: String(stockIdentity.reservedQuantity ?? stockItem.reservado),
+        },
+      }));
       return;
     }
 
     setIsSyncingStock(`save-row:${productId}`);
     setStockActionError('');
-    setRowErrors(current => ({ ...current, [productName]: '' }));
+    setRowErrors(current => ({ ...current, [rowId]: '' }));
 
     try {
       const inventory = await updateInventory(productId, {
@@ -229,7 +255,10 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       });
 
       updateStockItemLocally(productId, {
+        id: inventory.productId,
+        productId: inventory.productId,
         inventoryId: inventory.inventoryId,
+        supplierId: inventory.supplierId,
         total: inventory.totalQuantity,
         reservado: inventory.reservedQuantity,
         totalQuantity: inventory.totalQuantity,
@@ -257,9 +286,9 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
 
       setEditableRows(current => ({
         ...current,
-        [productName]: {
-          total: String(currentTotal),
-          reserved: String(stockItem.reservado),
+        [rowId]: {
+          total: String(stockIdentity.totalQuantity ?? currentTotal),
+          reserved: String(stockIdentity.reservedQuantity ?? stockItem.reservado),
         },
       }));
     } finally {
@@ -423,7 +452,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
       return;
     }
 
-    const realProductId = getRealStockProductId(previous);
+    const realProductId = getRealProductId(previous);
 
     const localUpdate = () => {
       updateStockItemLocally(productId, {
@@ -494,7 +523,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
     }
 
     const productId = String(getStockProductId(previous));
-    const realProductId = getRealStockProductId(previous);
+    const realProductId = getRealProductId(previous);
 
     const localDelete = () => {
       setStock(currentStock => currentStock.filter(item => getStockProductId(item) !== productId));
@@ -581,7 +610,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
               onClick={handleImportCsvDisabled}
               className="text-xs px-3 py-2 rounded-md border border-[#2a2a2a] light:border-gray-300 text-gray-300 light:text-gray-700 hover:bg-[#1a1a1a] dark:hover:bg-[#1a1a1a] light:hover:bg-gray-100 transition-colors"
             >
-              Importar CSV
+              Importar produtos
             </button>
           </div>
         </div>
@@ -664,11 +693,13 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
             </thead>
             <tbody>
               {filteredStock.map(item => {
-                const available = item.total - item.reservado;
+                const stockIdentity = item as StockIdentity;
+                const available = stockIdentity.availableQuantity ?? Math.max(0, item.total - item.reservado);
                 const minStockLevel = getMinStockLevel(item);
                 const isLowStock = minStockLevel > 0 && available <= minStockLevel;
-                const rowEdit = editableRows[item.produto] ?? { total: String(item.total), reserved: String(item.reservado) };
-                const rowSyncKey = `save-row:${String(getStockProductId(item))}`;
+                const rowId = getStockProductId(item);
+                const rowEdit = editableRows[rowId] ?? { total: String(item.total), reserved: String(item.reservado) };
+                const rowSyncKey = `save-row:${String(rowId)}`;
 
                 return (
                   <tr key={item.produto} className={`border-b border-[#222222] light:border-gray-200 transition-colors ${isLowStock ? 'bg-amber-500/10 dark:bg-amber-500/10 light:bg-amber-50' : ''}`}>
@@ -690,9 +721,9 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                           const value = event.target.value;
                           setEditableRows(current => ({
                             ...current,
-                            [item.produto]: {
+                            [rowId]: {
                               total: value,
-                              reserved: current[item.produto]?.reserved ?? String(item.reservado),
+                              reserved: current[rowId]?.reserved ?? String(item.reservado),
                             },
                           }));
                         }}
@@ -723,7 +754,7 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                         <button
                           type="button"
                           onClick={() => {
-                            void handleSaveRow(item.produto);
+                            void handleSaveRow(rowId);
                           }}
                           disabled={isSyncingStock === rowSyncKey}
                           className="text-xs px-2.5 py-1 rounded-md bg-[#00ff66]/15 text-[#00ff66] light:bg-green-100 light:text-green-700 hover:bg-[#00ff66]/25 transition-colors disabled:opacity-60"
@@ -739,8 +770,8 @@ export function StockManagementSection({ stock, setStock, movements, onRegisterM
                           Editar
                         </button>
                       </div>
-                      {rowErrors[item.produto] && (
-                        <p className="mt-1 text-xs text-red-400 light:text-red-700">{rowErrors[item.produto]}</p>
+                      {rowErrors[rowId] && (
+                        <p className="mt-1 text-xs text-red-400 light:text-red-700">{rowErrors[rowId]}</p>
                       )}
                     </td>
                   </tr>

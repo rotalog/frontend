@@ -41,6 +41,11 @@ export interface AuthResult {
   user: AuthenticatedUser;
 }
 
+export interface ResetPasswordPayload {
+  token: string;
+  newPassword: string;
+}
+
 interface AuthResponse {
   accessToken?: string;
   token?: string;
@@ -282,6 +287,16 @@ export async function forgotPassword(email: string) {
 
 export async function requestPasswordRecovery(email: string) {
   await forgotPassword(email);
+}
+
+export async function resetPassword(payload: ResetPasswordPayload) {
+  await api<void>('/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({
+      token: payload.token,
+      newPassword: payload.newPassword,
+    }),
+  });
 }
 
 export async function logoutSupplier() {

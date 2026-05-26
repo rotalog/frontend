@@ -4,6 +4,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import type { AuthResult } from '../services/auth';
 import { loginSupplier } from '../services/auth';
 import { ApiError } from '../services/api';
+import { RotalogBrand } from '../Components/RotalogBrand';
 import { ThemeToggleButton } from '../Components/ThemeToggleButton';
 
 interface LoginPageProps {
@@ -81,10 +82,8 @@ export function LoginPage({ theme, toggleTheme, onLogin }: LoginPageProps) {
 
       <div className="w-full max-w-md bg-[#141414] dark:bg-[#141414] light:bg-white border border-[#222222] light:border-gray-200 rounded-2xl p-6 md:p-8 shadow-card">
         <div className="mb-6">
-          <div className="w-10 h-10 bg-[#00ff66] rounded-lg flex items-center justify-center mb-3">
-            <span className="text-black font-bold">R</span>
-          </div>
-          <h1 className="text-2xl font-bold !text-white dark:!text-white light:!text-gray-900">Entrar na Rotalog</h1>
+          <RotalogBrand className="mb-4" iconClassName="h-16 w-16" textClassName="text-[2.6rem]" />
+          <h1 className="text-2xl font-bold !text-white dark:!text-white light:!text-gray-900">Login</h1>
           <p className="text-sm text-gray-400 light:text-gray-500 mt-1">Use suas credenciais para acessar o painel.</p>
         </div>
 
@@ -119,6 +118,12 @@ export function LoginPage({ theme, toggleTheme, onLogin }: LoginPageProps) {
               className="w-full rounded-lg bg-[#0f0f0f] dark:bg-[#0f0f0f] light:bg-gray-50 border border-[#2a2a2a] light:border-gray-300 px-3 py-2.5 text-sm text-white dark:text-white light:text-gray-900 placeholder:text-gray-500 outline-none focus:border-[#00ff66] transition-colors"
               placeholder="Digite sua senha"
             />
+          </div>
+
+          <div className="flex justify-end">
+            <Link to="/forgot-password" className="text-xs text-[#00ff66] font-medium hover:underline">
+              Esqueci minha senha
+            </Link>
           </div>
 
           {formError && (
