@@ -1606,7 +1606,13 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
             <div className="rounded-xl border border-[#222222] bg-[#151515] p-4 light:border-gray-200 light:bg-white">
               <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-base font-semibold !text-white dark:!text-white light:!text-gray-900">Estoque - reservas ativas</h2>
-                <button type="button" className="text-xs font-semibold text-[#00ff66]">Gerenciar estoque</button>
+                <button
+                  type="button"
+                  onClick={() => setActiveSection('ESTOQUE')}
+                  className="text-xs font-semibold text-[#00ff66]"
+                >
+                  Gerenciar estoque
+                </button>
               </div>
 
               <div className="overflow-x-auto">
