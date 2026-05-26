@@ -18,7 +18,7 @@ export interface SupplierRegisterPayload {
   longitude: number;
 }
 
-export interface RegisterPayload extends SupplierRegisterPayload {}
+export type RegisterPayload = SupplierRegisterPayload;
 
 export interface AuthUser {
   id: string;

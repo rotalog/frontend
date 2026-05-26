@@ -340,12 +340,10 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       setCurrentUserProfile(currentUserResult.status === 'fulfilled' ? currentUserResult.value : null);
       setSupplierId(typeof currentSupplierId === 'string' ? currentSupplierId : '');
 
-      let hasSuccess = false;
       let hasMockFallback = false;
 
       if (reportResult.status === 'fulfilled') {
         setDashboardReport(reportResult.value);
-        hasSuccess = true;
       } else {
         setDashboardReport(null);
       }
@@ -353,13 +351,11 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       if (ordersResult.status === 'fulfilled') {
         setApiOrders(ordersResult.value);
         setOverviewOrders(ordersResult.value.map(mapApiOrderToLegacyOrder));
-        hasSuccess = true;
       } else {
         setApiOrders([]);
         setOverviewOrders(mockOrders);
         setApiWarning('Exibindo dados demonstrativos.');
         hasMockFallback = true;
-        hasSuccess = true;
       }
 
       if (inventoryResult.status === 'fulfilled') {
@@ -373,13 +369,11 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         } else {
           setStock(inventoryResult.value.map(mapApiInventoryToLegacyStock));
         }
-        hasSuccess = true;
       } else {
         setApiInventory([]);
         if (productsResult.status === 'fulfilled') {
           setStock(mapProductAndInventoryToStock(productsResult.value, []));
           setInventoryNotInitialized(productsResult.value.length > 0);
-          hasSuccess = hasSuccess || productsResult.value.length > 0;
         } else {
           setStock([]);
           setInventoryNotInitialized(true);
@@ -391,7 +385,6 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         if (!selectedRouteId && todayRouteResult.value[0]?.id) {
           setSelectedRouteId(todayRouteResult.value[0].id);
         }
-        hasSuccess = true;
       } else {
         setTodayRoute([]);
       }
@@ -401,7 +394,6 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
         if (!selectedRouteId && routeHistoryResult.value[0]?.id) {
           setSelectedRouteId(routeHistoryResult.value[0].id);
         }
-        hasSuccess = true;
       } else {
         setRouteHistory([]);
       }
@@ -409,13 +401,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
       const hasPartialError = [reportResult, ordersResult, inventoryResult, todayRouteResult, routeHistoryResult, productsResult]
         .some(result => result.status === 'rejected');
 
-      if (!hasSuccess) {
-        hasMockFallback = false;
-      }
-
-      if (!hasSuccess) {
-        setDashboardError('Não foi possível carregar os dados do painel.');
-      } else if (hasPartialError && !hasMockFallback) {
+      if (hasPartialError && !hasMockFallback) {
         setApiWarning('Algumas informações ainda não estão disponíveis.');
       }
 
@@ -584,7 +570,7 @@ export function DashboardPage({ theme, toggleTheme, onLogout, companyName }: Das
           phone: typeof supplier.phone === 'string' ? supplier.phone : '',
           cnpj: typeof supplier.cnpj === 'string' ? supplier.cnpj : '',
         });
-      } catch (error) {
+      } catch {
         if (!active) {
           return;
         }
